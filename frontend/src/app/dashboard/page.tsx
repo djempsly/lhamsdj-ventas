@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
+import { posService } from "@/services/fiscal";
 
 const TEMAS = [
   { nombre: "Océano",  bg: "#03080f", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#0ea5e9", secondary: "#1d4ed8" },
@@ -17,6 +18,13 @@ export default function Dashboard() {
   const [usuario, setUsuario] = useState<{nombre: string; rol: string} | null>(null);
   const [tema, setTema] = useState<Tema>(TEMAS[0]);
   const [showTemas, setShowTemas] = useState(false);
+  const [stats, setStats] = useState({
+    total_ventas: 0,
+    total_ganancia: 0,
+    cantidad_ventas: 0,
+    ticket_promedio: 0
+  });
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     const u = localStorage.getItem("usuario");
@@ -24,6 +32,19 @@ export default function Dashboard() {
     setUsuario(JSON.parse(u));
     const temaGuardado = localStorage.getItem("tema");
     if (temaGuardado) setTema(JSON.parse(temaGuardado));
+
+    // Cargar datos reales
+    const fetchStats = async () => {
+      try {
+        const { data } = await posService.getDashboard();
+        setStats(data);
+      } catch (error) {
+        console.error("Error cargando dashboard", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetchStats();
   }, []);
 
   const cambiarTema = (t: Tema) => {
@@ -38,6 +59,10 @@ export default function Dashboard() {
   };
 
   const esClaro = tema.nombre === "Claro";
+
+  const formatCurrency = (amount: number) => {
+    return new Intl.NumberFormat('es-DO', { style: 'currency', currency: 'DOP' }).format(amount);
+  };
 
   return (
     <>
@@ -216,10 +241,10 @@ export default function Dashboard() {
 
           <div className="stats-grid">
             {[
-              { icon:"💰", value:"RD$0", label:"Ventas de hoy" },
-              { icon:"🛒", value:"0",    label:"Transacciones" },
-              { icon:"📦", value:"0",    label:"Productos en stock" },
-              { icon:"👥", value:"0",    label:"Clientes registrados" },
+              { icon:"💰", value: loading ? "..." : formatCurrency(stats.total_ventas), label:"Ventas de hoy" },
+              { icon:"🛒", value: loading ? "..." : stats.cantidad_ventas,    label:"Transacciones" },
+              { icon:"📈", value: loading ? "..." : (stats.total_ganancia !== null ? formatCurrency(stats.total_ganancia) : "---"), label:"Ganancia Estimada" },
+              { icon:"🎟️", value: loading ? "..." : formatCurrency(stats.ticket_promedio),    label:"Ticket Promedio" },
             ].map((s,i) => (
               <div className="stat-card" key={i}>
                 <div className="stat-icon">{s.icon}</div>
@@ -233,17 +258,17 @@ export default function Dashboard() {
           <div className="section-title">Módulos del sistema</div>
           <div className="menu-grid">
             {[
-              { emoji:"🛒", name:"Punto de Venta",  desc:"Registrar ventas" },
-              { emoji:"📦", name:"Inventario",       desc:"Productos y stock" },
-              { emoji:"👥", name:"Clientes",         desc:"Gestión de clientes" },
-              { emoji:"🏭", name:"Proveedores",      desc:"Gestión de compras" },
-              { emoji:"🧾", name:"Facturación",      desc:"e-CF DGII" },
-              { emoji:"📊", name:"Reportes",         desc:"Análisis y estadísticas" },
-              { emoji:"🧮", name:"Contabilidad",     desc:"Motor contable" },
-              { emoji:"🤖", name:"AI Agent",         desc:"Análisis inteligente" },
-              { emoji:"⚙️", name:"Configuración",   desc:"Ajustes del sistema" },
+              { emoji:"🛒", name:"Punto de Venta",  desc:"Registrar ventas", link: "/dashboard/pos" },
+              { emoji:"📦", name:"Inventario",       desc:"Productos y stock", link: "/dashboard/productos" },
+              { emoji:"👥", name:"Clientes",         desc:"Gestión de clientes", link: "/dashboard/clientes" },
+              { emoji:"🏭", name:"Proveedores",      desc:"Gestión de compras", link: "/dashboard/proveedores" },
+              { emoji:"🧾", name:"Facturación",      desc:"e-CF DGII", link: "/dashboard/pos" },
+              { emoji:"📊", name:"Reportes",         desc:"Análisis y estadísticas", link: "/dashboard/reportes" },
+              { emoji:"🧮", name:"Contabilidad",     desc:"Motor contable", link: "/dashboard/contabilidad" },
+              { emoji:"🤖", name:"AI Agent",         desc:"Análisis inteligente", link: "/dashboard/ai" },
+              { emoji:"⚙️", name:"Configuración",   desc:"Ajustes del sistema", link: "/dashboard/settings" },
             ].map((m,i) => (
-              <div className="menu-item" key={i}>
+              <div className="menu-item" key={i} onClick={() => window.location.href = m.link}>
                 <div className="menu-emoji">{m.emoji}</div>
                 <div className="menu-name">{m.name}</div>
                 <div className="menu-desc">{m.desc}</div>
