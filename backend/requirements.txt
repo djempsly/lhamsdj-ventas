@@ -1,0 +1,9 @@
+django>=5.0
+djangorestframework>=3.14
+psycopg2-binary
+python-dotenv
+signxml>=3.0.0
+lxml>=4.9.0
+cryptography>=41.0.0
+Pillow
+django-cors-headers

@@ -59,10 +59,18 @@ class UsuarioSerializer(serializers.ModelSerializer):
 
 class CuentaContableSerializer(serializers.ModelSerializer):
     cuenta_padre_nombre = serializers.CharField(source='cuenta_padre.nombre', read_only=True)
+    subcuentas = serializers.SerializerMethodField()
     
     class Meta:
         model = CuentaContable
-        fields = '__all__'
+        fields = ['id', 'codigo', 'nombre', 'tipo', 'naturaleza', 'nivel', 
+                  'es_cuenta_detalle', 'saldo_actual', 'activa', 'cuenta_padre', 
+                  'cuenta_padre_nombre', 'subcuentas']
+        
+    def get_subcuentas(self, obj):
+        if obj.subcuentas.exists():
+            return CuentaContableSerializer(obj.subcuentas.all(), many=True).data
+        return []
 
 
 class CategoriaSerializer(serializers.ModelSerializer):

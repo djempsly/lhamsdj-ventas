@@ -1,6 +1,9 @@
 from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.core.validators import MinValueValidator
+from django.core.exceptions import ValidationError
+from django.db import transaction
+from django.db.models import Sum, Q, F
 from decimal import Decimal
 import uuid
 from datetime import datetime
@@ -87,7 +90,9 @@ class Negocio(models.Model):
     
     # Configuración fiscal
     regimen_fiscal = models.CharField(max_length=50, blank=True)
-    certificado_digital = models.TextField(blank=True)  # Encriptado
+    # SECURITY NOTE: Store encrypted or in Vault. Never plain text.
+    certificado_digital_path = models.CharField(max_length=255, blank=True, help_text="Ruta segura al .p12")
+    certificado_pass_env = models.CharField(max_length=100, blank=True, help_text="Nombre de ENV VAR con la clave")
     api_fiscal_usuario = models.CharField(max_length=100, blank=True)
     api_fiscal_clave = models.CharField(max_length=255, blank=True)  # Encriptado
     ambiente_fiscal = models.CharField(max_length=10, choices=[('TEST', 'Pruebas'), ('PROD', 'Producción')], default='TEST')
@@ -216,8 +221,35 @@ class AuditLog(models.Model):
 
 
 # =============================================================================
-# CONTABILIDAD - MOTOR CONTABLE REAL
+# CONTABILIDAD - MOTOR CONTABLE REAL (Task 3 & 4)
 # =============================================================================
+
+class CuentaContableManager(models.Manager):
+    """Manager para consultas avanzadas de contabilidad"""
+    def get_balance(self, cuenta_id, fecha_inicio=None, fecha_fin=None):
+        """Calcula el balance de una cuenta en un rango de fechas"""
+        qs = LineaAsiento.objects.filter(
+            cuenta_id=cuenta_id,
+            asiento__estado='CONTABILIZADO'
+        )
+        if fecha_inicio:
+            qs = qs.filter(asiento__fecha__gte=fecha_inicio)
+        if fecha_fin:
+            qs = qs.filter(asiento__fecha__lte=fecha_fin)
+            
+        res = qs.aggregate(
+            total_debe=Sum('debe'),
+            total_haber=Sum('haber')
+        )
+        debe = res['total_debe'] or Decimal(0)
+        haber = res['total_haber'] or Decimal(0)
+        
+        # El balance depende de la naturaleza
+        cuenta = self.get(id=cuenta_id)
+        if cuenta.naturaleza == 'DEUDORA':
+            return debe - haber
+        else:
+            return haber - debe
 
 class CuentaContable(models.Model):
     """Plan de cuentas contable completo"""
@@ -249,6 +281,8 @@ class CuentaContable(models.Model):
     saldo_actual = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     activa = models.BooleanField(default=True)
     
+    objects = CuentaContableManager()
+    
     class Meta:
         unique_together = ['negocio', 'codigo']
         ordering = ['codigo']
@@ -279,7 +313,7 @@ class PeriodoContable(models.Model):
 
 
 class AsientoContable(models.Model):
-    """Asientos contables"""
+    """Asientos contables - ACID Compliant"""
     TIPO = [
         ('MANUAL', 'Manual'),
         ('VENTA', 'Venta'),
@@ -297,7 +331,7 @@ class AsientoContable(models.Model):
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
-    periodo = models.ForeignKey(PeriodoContable, on_delete=models.PROTECT)
+    periodo = models.ForeignKey(PeriodoContable, on_delete=models.PROTECT, null=True, blank=True)
     
     numero = models.CharField(max_length=20)
     fecha = models.DateField()
@@ -315,6 +349,40 @@ class AsientoContable(models.Model):
     class Meta:
         unique_together = ['negocio', 'numero']
         ordering = ['-fecha', '-numero']
+        indexes = [
+            models.Index(fields=['negocio', 'fecha']),
+            models.Index(fields=['negocio', 'estado']),
+        ]
+        
+    def clean(self):
+        """Validación estricta de partida doble"""
+        if self.estado == 'CONTABILIZADO':
+            if abs(self.total_debe - self.total_haber) > Decimal('0.01'):
+                raise ValidationError("El asiento no está balanceado (Debe != Haber).")
+            if not self.lineas.exists():
+                raise ValidationError("Un asiento contabilizado debe tener líneas.")
+
+    @transaction.atomic
+    def contabilizar(self):
+        """Método seguro para contabilizar el asiento"""
+        # Recalcular totales reales desde líneas
+        totales = self.lineas.aggregate(d=Sum('debe'), h=Sum('haber'))
+        self.total_debe = totales['d'] or 0
+        self.total_haber = totales['h'] or 0
+        
+        self.clean() # Validar balance
+        
+        self.estado = 'CONTABILIZADO'
+        self.save()
+        
+        # Actualizar saldos de cuentas (opcional si se usa cálculo al vuelo)
+        for linea in self.lineas.all():
+            cuenta = linea.cuenta
+            if cuenta.naturaleza == 'DEUDORA':
+                cuenta.saldo_actual += (linea.debe - linea.haber)
+            else:
+                cuenta.saldo_actual += (linea.haber - linea.debe)
+            cuenta.save()
 
 
 class LineaAsiento(models.Model):
@@ -326,6 +394,14 @@ class LineaAsiento(models.Model):
     descripcion = models.CharField(max_length=200, blank=True)
     debe = models.DecimalField(max_digits=15, decimal_places=2, default=0)
     haber = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                check=Q(debe__gte=0) & Q(haber__gte=0),
+                name='monto_positivo'
+            )
+        ]
 
 
 # =============================================================================
@@ -575,7 +651,7 @@ class Proveedor(models.Model):
 
 
 # =============================================================================
-# VENTAS Y FACTURACIÓN
+# VENTAS Y FACTURACIÓN (e-CF Enhanced)
 # =============================================================================
 
 class SecuenciaNCF(models.Model):
@@ -611,10 +687,12 @@ class Venta(models.Model):
         ('ANULADA', 'Anulada'),
     ]
     ESTADO_FISCAL = [
-        ('PENDIENTE', 'Pendiente'),
-        ('ENVIADO', 'Enviado'),
-        ('APROBADO', 'Aprobado'),
+        ('NO_FISCAL', 'No Fiscal'),
+        ('PENDIENTE', 'Pendiente de Envío'),
+        ('ENVIADO', 'Enviado a DGII'),
+        ('ACEPTADO', 'Aceptado'),
         ('RECHAZADO', 'Rechazado'),
+        ('EN_CONTINGENCIA', 'En Contingencia'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -654,8 +732,8 @@ class Venta(models.Model):
     
     # Estado
     estado = models.CharField(max_length=15, choices=ESTADO, default='BORRADOR')
-    estado_fiscal = models.CharField(max_length=15, choices=ESTADO_FISCAL, default='PENDIENTE')
-    codigo_seguridad_dgii = models.CharField(max_length=50, blank=True)
+    estado_fiscal = models.CharField(max_length=20, choices=ESTADO_FISCAL, default='NO_FISCAL')
+    codigo_seguridad_dgii = models.CharField(max_length=6, blank=True, help_text="Código de 6 dígitos del e-CF")
     
     # Contabilidad
     asiento = models.ForeignKey(AsientoContable, on_delete=models.SET_NULL, null=True, blank=True)
@@ -673,6 +751,23 @@ class Venta(models.Model):
     
     def __str__(self):
         return f"{self.numero} - RD${self.total}"
+
+
+class FacturaElectronica(models.Model):
+    """Extension de Venta para e-CF DGII (Task 1: Invoice Model)"""
+    venta = models.OneToOneField(Venta, on_delete=models.CASCADE, related_name='ecf_data', primary_key=True)
+    
+    track_id = models.CharField(max_length=50, unique=True, null=True, blank=True)
+    ecf_tipo = models.CharField(max_length=3, default='31') # 31: Factura Crédito Fiscal, 32: Consumo, etc.
+    fecha_firma = models.DateTimeField(null=True, blank=True)
+    
+    xml_firmado = models.TextField(blank=True, help_text="XML completo firmado (XMLDSig)")
+    respuesta_dgii = models.JSONField(null=True, blank=True, help_text="Respuesta cruda de la DGII")
+    
+    qr_code_url = models.URLField(max_length=500, blank=True)
+    
+    def __str__(self):
+        return f"eCF: {self.venta.ncf}"
 
 
 class DetalleVenta(models.Model):
