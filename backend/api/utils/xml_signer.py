@@ -9,18 +9,25 @@ def sign_ecf_xml(xml_content: bytes, p12_path: str, p12_password: str) -> str:
     """
     Firma un XML (e-CF) usando un certificado .p12 bajo el estándar XMLDSig.
     Cumple con los requisitos de la DGII (República Dominicana).
-    
+    Valida el certificado antes de firmar.
+
     Args:
         xml_content (bytes): Contenido del XML a firmar.
         p12_path (str): Ruta al archivo .p12.
         p12_password (str): Contraseña del archivo .p12.
-        
+
     Returns:
         str: XML firmado en formato string.
     """
-    
+
     if not os.path.exists(p12_path):
         raise FileNotFoundError(f"El certificado no existe en: {p12_path}")
+
+    # Validate certificate before signing
+    from .cert_validator import validate_p12_certificate
+    cert_status = validate_p12_certificate(p12_path, p12_password)
+    if not cert_status['valid']:
+        raise ValueError(f"Certificado inválido: {cert_status['error']}")
 
     # 1. Cargar el .p12
     with open(p12_path, "rb") as f:

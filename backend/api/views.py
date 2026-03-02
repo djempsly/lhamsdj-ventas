@@ -21,9 +21,11 @@ from django.http import HttpResponse
 
 from .models import (
     Pais, Moneda, Negocio, Sucursal, Usuario, AuditLog,
-    CuentaContable, Categoria, Producto, Almacen,
+    CuentaContable, PeriodoContable, AsientoContable, LineaAsiento,
+    Categoria, Producto, Almacen,
     Cliente, Proveedor, Venta, DetalleVenta, CuadreCaja, AnalisisAI,
-    FacturaElectronica,
+    FacturaElectronica, Compra, DetalleCompra,
+    CuentaBancaria, MovimientoBancario, Conciliacion,
 )
 from .serializers import (
     PaisSerializer, MonedaSerializer, NegocioSerializer, SucursalSerializer,
@@ -31,6 +33,8 @@ from .serializers import (
     ProductoSerializer, ClienteSerializer, ProveedorSerializer,
     VentaSerializer, DetalleVentaSerializer, CuadreCajaSerializer,
     AnalisisAISerializer,
+    CompraSerializer, PeriodoContableSerializer,
+    CuentaBancariaSerializer, MovimientoBancarioSerializer, ConciliacionSerializer,
 )
 from .permissions import (
     IsNegocioMember, CanEmitECF, CanViewReports,
@@ -38,6 +42,9 @@ from .permissions import (
 )
 from .utils.ecf_generator import ECFGenerator
 from .utils.xml_signer import sign_ecf_xml
+from .utils.cert_validator import validate_p12_certificate
+from .utils.ncf_manager import obtener_siguiente_ncf
+from .utils.dgii_api import DGIIClient
 from .fiscal.strategies.dgii import FiscalStrategyFactory
 
 logger = logging.getLogger('security')
@@ -331,6 +338,23 @@ class NegocioViewSet(viewsets.ModelViewSet):
             raise PermissionDenied('No tiene permisos para modificar el negocio.')
         serializer.save()
 
+    @action(detail=True, methods=['get'], url_path='certificado-status')
+    def certificado_status(self, request, pk=None):
+        """GET /negocios/{id}/certificado-status/ — consulta estado del certificado digital."""
+        negocio = self.get_object()
+        p12_path = negocio.certificado_digital_path
+        p12_pass = os.getenv(negocio.certificado_pass_env) if negocio.certificado_pass_env else None
+
+        if not p12_path or not p12_pass:
+            return Response({
+                'configurado': False,
+                'error': 'Certificado digital no configurado.',
+            })
+
+        cert_info = validate_p12_certificate(p12_path, p12_pass)
+        cert_info['configurado'] = True
+        return Response(cert_info)
+
 
 class SucursalViewSet(viewsets.ModelViewSet):
     serializer_class = SucursalSerializer
@@ -376,6 +400,43 @@ class CuentaContableViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=False, methods=['get'], url_path='balance-general')
+    def balance_general(self, request):
+        """GET /cuentas-contables/balance-general/?fecha=2024-12-31"""
+        from .utils.estados_financieros import generar_balance_general
+        from datetime import date
+
+        fecha_str = request.query_params.get('fecha')
+        if fecha_str:
+            try:
+                fecha = date.fromisoformat(fecha_str)
+            except ValueError:
+                raise ValidationError('Formato de fecha inválido. Use YYYY-MM-DD.')
+        else:
+            fecha = timezone.now().date()
+
+        data = generar_balance_general(request.user.negocio, fecha)
+        return Response(data)
+
+    @action(detail=False, methods=['get'], url_path='estado-resultados')
+    def estado_resultados(self, request):
+        """GET /cuentas-contables/estado-resultados/?desde=2024-01-01&hasta=2024-12-31"""
+        from .utils.estados_financieros import generar_estado_resultados
+        from datetime import date
+
+        desde_str = request.query_params.get('desde')
+        hasta_str = request.query_params.get('hasta')
+        if not desde_str or not hasta_str:
+            raise ValidationError('Parámetros desde y hasta son requeridos.')
+        try:
+            desde = date.fromisoformat(desde_str)
+            hasta = date.fromisoformat(hasta_str)
+        except ValueError:
+            raise ValidationError('Formato de fecha inválido. Use YYYY-MM-DD.')
+
+        data = generar_estado_resultados(request.user.negocio, desde, hasta)
+        return Response(data)
 
 
 # =============================================================================
@@ -495,6 +556,8 @@ class VentaViewSet(viewsets.ModelViewSet):
     @action(detail=True, methods=['post'], url_path='emitir-ecf')
     def emitir_ecf(self, request, pk=None):
         """Generate, sign, and submit an e-CF to DGII."""
+        import random
+
         venta = self.get_object()
 
         # --- Permission check ---
@@ -525,13 +588,36 @@ class VentaViewSet(viewsets.ModelViewSet):
                 'Archivo de certificado digital no encontrado. Verifique la configuracion.'
             )
 
+        # Validate certificate before signing
+        cert_status = validate_p12_certificate(p12_path, p12_pass)
+        if not cert_status['valid']:
+            raise ValidationError(f'Certificado digital inválido: {cert_status["error"]}')
+
         try:
             with transaction.atomic():
+                # 0. Auto-assign NCF if not present
+                if not venta.ncf:
+                    tipo = venta.tipo_comprobante or 'B02'
+                    venta.ncf = obtener_siguiente_ncf(negocio, tipo)
+                    venta.tipo_comprobante = tipo
+
+                # Generate security code (6 random digits)
+                codigo_seguridad = f"{random.randint(0, 999999):06d}"
+                venta.codigo_seguridad_dgii = codigo_seguridad
+                venta.save(update_fields=['ncf', 'tipo_comprobante', 'codigo_seguridad_dgii'])
+
+                # Determine e-CF type
+                tipo_ecf_map = {
+                    'B01': '31', 'B02': '32', 'B03': '33', 'B04': '34',
+                    'B11': '41', 'B13': '43', 'B14': '44', 'B15': '45',
+                }
+                ecf_tipo = tipo_ecf_map.get(venta.tipo_comprobante, '32')
+
                 # 1. Generate XML
                 generator = ECFGenerator(venta)
                 xml_content = generator.generate_xml()
 
-                # 2. Sign XML (MUST succeed - no fallback)
+                # 2. Sign XML
                 xml_firmado = sign_ecf_xml(
                     xml_content.encode('utf-8'), p12_path, p12_pass,
                 )
@@ -539,34 +625,121 @@ class VentaViewSet(viewsets.ModelViewSet):
                 # 3. Create / update e-CF record
                 ecf_record, _ = FacturaElectronica.objects.get_or_create(
                     venta=venta,
-                    defaults={'ecf_tipo': '31'},
+                    defaults={'ecf_tipo': ecf_tipo},
                 )
+                ecf_record.ecf_tipo = ecf_tipo
                 ecf_record.xml_firmado = xml_firmado
                 ecf_record.fecha_firma = timezone.now()
-                ecf_record.track_id = f"TRACK-{uuid.uuid4().hex[:10].upper()}"
+
+                # 4. Send to DGII API
+                dgii_client = DGIIClient(
+                    ambiente=negocio.ambiente_fiscal,
+                    rnc=negocio.identificacion_fiscal.replace('-', ''),
+                    usuario=negocio.api_fiscal_usuario,
+                    clave=negocio.api_fiscal_clave_decrypted,
+                )
+                dgii_response = dgii_client.enviar_ecf(xml_firmado)
+
+                ecf_record.track_id = dgii_response.get('track_id') or f"TRACK-{uuid.uuid4().hex[:10].upper()}"
+                ecf_record.respuesta_dgii = dgii_response.get('respuesta_cruda')
+
+                # 5. Generate QR URL
+                rnc = negocio.identificacion_fiscal.replace('-', '')
+                ecf_record.qr_code_url = (
+                    f"https://dgii.gov.do/ecf?rnc={rnc}&encf={venta.ncf}&sc={codigo_seguridad}"
+                )
                 ecf_record.save()
 
-                # 4. Update sale fiscal status
-                venta.estado_fiscal = 'ENVIADO'
+                # 6. Update fiscal status based on DGII response
+                dgii_estado = dgii_response.get('estado', '')
+                if dgii_estado == 'ERROR':
+                    venta.estado_fiscal = 'EN_CONTINGENCIA'
+                elif dgii_estado == 'RECHAZADO':
+                    venta.estado_fiscal = 'RECHAZADO'
+                else:
+                    venta.estado_fiscal = 'ENVIADO'
                 venta.save(update_fields=['estado_fiscal'])
 
                 logger.info(
-                    'e-CF emitted: venta=%s track=%s user=%s',
-                    venta.numero, ecf_record.track_id, request.user.username,
+                    'e-CF emitted: venta=%s ncf=%s track=%s dgii_status=%s user=%s',
+                    venta.numero, venta.ncf, ecf_record.track_id,
+                    dgii_estado, request.user.username,
                 )
 
                 return Response({
                     'status': 'success',
+                    'ncf': venta.ncf,
+                    'codigo_seguridad': codigo_seguridad,
                     'track_id': ecf_record.track_id,
+                    'dgii_estado': dgii_estado,
+                    'qr_url': ecf_record.qr_code_url,
                     'xml_preview': xml_firmado[:200] + '...',
                 })
 
+        except ValueError as e:
+            raise ValidationError(str(e))
         except (FileNotFoundError, OSError) as e:
             logger.error('Certificate error for venta %s: %s', venta.numero, e)
             raise ValidationError(f'Error de certificado: {e}')
         except Exception as e:
             logger.error('e-CF generation failed for venta %s: %s', venta.numero, e)
             return Response({'error': 'Error generando e-CF. Contacte al administrador.'}, status=500)
+
+    @action(detail=True, methods=['post'], url_path='anular')
+    def anular_venta(self, request, pk=None):
+        """Anula una venta y genera una Nota de Crédito (e-CF tipo 34)."""
+        venta_original = self.get_object()
+
+        if request.user.rol not in ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'CONTADOR', 'GERENTE'):
+            raise PermissionDenied('No tiene permisos para anular ventas.')
+
+        if venta_original.estado == 'ANULADA':
+            raise ValidationError('Esta venta ya está anulada.')
+
+        if venta_original.estado != 'COMPLETADA':
+            raise ValidationError('Solo se pueden anular ventas completadas.')
+
+        try:
+            with transaction.atomic():
+                # Create nota de crédito
+                nota_credito = Venta.objects.create(
+                    negocio=venta_original.negocio,
+                    sucursal=venta_original.sucursal,
+                    numero=f"NC-{venta_original.numero}",
+                    tipo_comprobante='B04',
+                    cliente=venta_original.cliente,
+                    cajero=request.user,
+                    subtotal=venta_original.subtotal,
+                    descuento=venta_original.descuento,
+                    subtotal_con_descuento=venta_original.subtotal_con_descuento,
+                    total_impuestos=venta_original.total_impuestos,
+                    total=venta_original.total,
+                    costo_total=venta_original.costo_total,
+                    tipo_pago=venta_original.tipo_pago,
+                    monto_pagado=venta_original.total,
+                    estado='COMPLETADA',
+                    venta_referencia=venta_original,
+                    notas=f'Nota de Crédito por anulación de venta {venta_original.numero}',
+                )
+
+                # Revert stock
+                for detalle in venta_original.detalles.all():
+                    detalle.producto.stock_actual += detalle.cantidad
+                    detalle.producto.save(update_fields=['stock_actual'])
+
+                # Mark original as annulled
+                venta_original.estado = 'ANULADA'
+                venta_original.save(update_fields=['estado'])
+
+                return Response({
+                    'status': 'success',
+                    'nota_credito_id': str(nota_credito.id),
+                    'nota_credito_numero': nota_credito.numero,
+                })
+
+        except Exception as e:
+            logger.error('Error anulando venta %s: %s', venta_original.numero, e)
+            return Response({'error': str(e)}, status=500)
 
 
 # =============================================================================
@@ -596,13 +769,15 @@ class ReporteFiscalViewSet(viewsets.ViewSet):
         year, month = self._get_params(request)
         tipo = request.query_params.get('tipo', '607')
 
-        if tipo not in ('606', '607'):
-            raise ValidationError('Tipo de reporte no valido. Use 606 o 607.')
+        if tipo not in ('606', '607', '608'):
+            raise ValidationError('Tipo de reporte no valido. Use 606, 607 o 608.')
 
         strategy = FiscalStrategyFactory.get_strategy(request.user.negocio)
 
         if tipo == '607':
             data = strategy.generar_reporte_ventas(year, month)
+        elif tipo == '608':
+            data = strategy.generar_reporte_anulaciones(year, month)
         else:
             data = strategy.generar_reporte_compras(year, month)
 
@@ -618,7 +793,7 @@ class ReporteFiscalViewSet(viewsets.ViewSet):
         year, month = self._get_params(request)
         tipo = request.query_params.get('tipo', '607')
 
-        if tipo not in ('606', '607'):
+        if tipo not in ('606', '607', '608'):
             raise ValidationError('Tipo de reporte no valido.')
 
         strategy = FiscalStrategyFactory.get_strategy(request.user.negocio)
@@ -662,3 +837,319 @@ class AnalisisAIViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         return AnalisisAI.objects.filter(negocio=self.request.user.negocio)
+
+    @action(detail=False, methods=['post'], url_path='generar')
+    def generar(self, request):
+        """POST /analisis-ai/generar/ — ejecuta análisis AI bajo demanda."""
+        from .utils.ai_engine import analizar_ventas, detectar_anomalias, generar_recomendaciones
+
+        tipo = request.data.get('tipo', 'INSIGHT')
+        negocio = request.user.negocio
+
+        if tipo == 'ANOMALIA':
+            analisis = detectar_anomalias(negocio)
+        elif tipo == 'RECOMENDACION':
+            analisis = generar_recomendaciones(negocio)
+        else:
+            dias = int(request.data.get('dias', 30))
+            analisis = analizar_ventas(negocio, dias)
+
+        serializer = self.get_serializer(analisis)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+# =============================================================================
+# COMPRAS
+# =============================================================================
+
+class CompraViewSet(viewsets.ModelViewSet):
+    serializer_class = CompraSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return Compra.objects.filter(
+            negocio=self.request.user.negocio,
+        ).select_related('proveedor').order_by('-fecha')
+
+    def perform_create(self, serializer):
+        negocio = self.request.user.negocio
+        count = Compra.objects.filter(negocio=negocio).count()
+        numero = f"CMP-{count + 1:06d}"
+        serializer.save(negocio=negocio, numero=numero)
+
+    @action(detail=True, methods=['post'])
+    def recibir(self, request, pk=None):
+        """Marca la compra como recibida y actualiza stock."""
+        compra = self.get_object()
+
+        if compra.estado != 'BORRADOR':
+            raise ValidationError('Solo se pueden recibir compras en estado borrador.')
+
+        with transaction.atomic():
+            compra.estado = 'RECIBIDA'
+            compra.fecha_recepcion = timezone.now().date()
+            compra.save(update_fields=['estado', 'fecha_recepcion'])
+
+            for detalle in compra.detalles.all():
+                detalle.producto.stock_actual += detalle.cantidad
+                detalle.producto.save(update_fields=['stock_actual'])
+
+        serializer = self.get_serializer(compra)
+        return Response(serializer.data)
+
+
+# =============================================================================
+# PERÍODO CONTABLE
+# =============================================================================
+
+class PeriodoContableViewSet(viewsets.ModelViewSet):
+    serializer_class = PeriodoContableSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return PeriodoContable.objects.filter(negocio=self.request.user.negocio)
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=True, methods=['post'])
+    def cerrar(self, request, pk=None):
+        """Cierra un período contable."""
+        periodo = self.get_object()
+
+        if periodo.estado == 'CERRADO':
+            raise ValidationError('Este período ya está cerrado.')
+
+        # Verificar que no hay asientos en borrador
+        borradores = AsientoContable.objects.filter(
+            negocio=request.user.negocio,
+            periodo=periodo,
+            estado='BORRADOR',
+        ).count()
+
+        if borradores > 0:
+            raise ValidationError(
+                f'Hay {borradores} asiento(s) en borrador. Contabilice o anule antes de cerrar.'
+            )
+
+        with transaction.atomic():
+            # Generate closing entry — move income/expense to equity
+            ingresos = LineaAsiento.objects.filter(
+                asiento__periodo=periodo,
+                asiento__estado='CONTABILIZADO',
+                cuenta__tipo='INGRESO',
+            ).aggregate(
+                debe=Sum('debe'), haber=Sum('haber'),
+            )
+            gastos = LineaAsiento.objects.filter(
+                asiento__periodo=periodo,
+                asiento__estado='CONTABILIZADO',
+                cuenta__tipo__in=['GASTO', 'COSTO'],
+            ).aggregate(
+                debe=Sum('debe'), haber=Sum('haber'),
+            )
+
+            total_ingresos = (ingresos['haber'] or 0) - (ingresos['debe'] or 0)
+            total_gastos = (gastos['debe'] or 0) - (gastos['haber'] or 0)
+            resultado = total_ingresos - total_gastos
+
+            if abs(resultado) > 0:
+                # Create closing entry
+                from decimal import Decimal
+                negocio = request.user.negocio
+                count = AsientoContable.objects.filter(negocio=negocio).count()
+                asiento_cierre = AsientoContable.objects.create(
+                    negocio=negocio,
+                    periodo=periodo,
+                    numero=f"AST-{count + 1:06d}",
+                    fecha=periodo.fecha_fin,
+                    tipo='CIERRE',
+                    descripcion=f'Asiento de cierre período {periodo.nombre}',
+                    referencia=f'CIERRE-{periodo.nombre}',
+                    creado_por=request.user,
+                )
+
+                # Find resultado del ejercicio account
+                resultado_cuenta = CuentaContable.objects.filter(
+                    negocio=negocio,
+                    tipo='PATRIMONIO',
+                    es_cuenta_detalle=True,
+                    activa=True,
+                ).first()
+
+                if resultado_cuenta:
+                    if resultado >= 0:
+                        LineaAsiento.objects.create(
+                            asiento=asiento_cierre,
+                            cuenta=resultado_cuenta,
+                            descripcion='Resultado del ejercicio',
+                            debe=Decimal('0'),
+                            haber=abs(resultado),
+                        )
+                        # Balancing debit entry
+                        ingreso_cuenta = CuentaContable.objects.filter(
+                            negocio=negocio, tipo='INGRESO',
+                            es_cuenta_detalle=True, activa=True,
+                        ).first()
+                        if ingreso_cuenta:
+                            LineaAsiento.objects.create(
+                                asiento=asiento_cierre,
+                                cuenta=ingreso_cuenta,
+                                descripcion='Cierre ingresos',
+                                debe=abs(resultado),
+                                haber=Decimal('0'),
+                            )
+                    else:
+                        LineaAsiento.objects.create(
+                            asiento=asiento_cierre,
+                            cuenta=resultado_cuenta,
+                            descripcion='Pérdida del ejercicio',
+                            debe=abs(resultado),
+                            haber=Decimal('0'),
+                        )
+                        gasto_cuenta = CuentaContable.objects.filter(
+                            negocio=negocio, tipo='GASTO',
+                            es_cuenta_detalle=True, activa=True,
+                        ).first()
+                        if gasto_cuenta:
+                            LineaAsiento.objects.create(
+                                asiento=asiento_cierre,
+                                cuenta=gasto_cuenta,
+                                descripcion='Cierre gastos',
+                                debe=Decimal('0'),
+                                haber=abs(resultado),
+                            )
+
+                    asiento_cierre.contabilizar()
+
+            periodo.estado = 'CERRADO'
+            periodo.cerrado_por = request.user
+            periodo.fecha_cierre = timezone.now()
+            periodo.save()
+
+        serializer = self.get_serializer(periodo)
+        return Response(serializer.data)
+
+
+# =============================================================================
+# RECONCILIACIÓN BANCARIA
+# =============================================================================
+
+class CuentaBancariaViewSet(viewsets.ModelViewSet):
+    serializer_class = CuentaBancariaSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return CuentaBancaria.objects.filter(negocio=self.request.user.negocio)
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=True, methods=['get'])
+    def movimientos(self, request, pk=None):
+        """GET /cuentas-bancarias/{id}/movimientos/"""
+        cuenta = self.get_object()
+        movimientos = MovimientoBancario.objects.filter(cuenta=cuenta)
+        serializer = MovimientoBancarioSerializer(movimientos, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='importar-movimientos')
+    def importar_movimientos(self, request, pk=None):
+        """POST /cuentas-bancarias/{id}/importar-movimientos/ — acepta CSV con movimientos."""
+        import csv
+        import io
+
+        cuenta = self.get_object()
+        archivo = request.FILES.get('archivo')
+
+        if not archivo:
+            raise ValidationError('Se requiere un archivo CSV.')
+
+        try:
+            decoded = archivo.read().decode('utf-8')
+            reader = csv.DictReader(io.StringIO(decoded))
+
+            created = 0
+            for row in reader:
+                from datetime import date as dt_date
+                MovimientoBancario.objects.create(
+                    cuenta=cuenta,
+                    fecha=dt_date.fromisoformat(row.get('fecha', '')),
+                    descripcion=row.get('descripcion', '')[:300],
+                    referencia=row.get('referencia', '')[:100],
+                    monto=row.get('monto', 0),
+                    tipo=row.get('tipo', 'DEBITO').upper(),
+                    saldo_posterior=row.get('saldo', 0),
+                    importado_de=archivo.name[:100],
+                )
+                created += 1
+
+            return Response({
+                'status': 'success',
+                'movimientos_importados': created,
+            })
+        except Exception as e:
+            raise ValidationError(f'Error procesando archivo: {e}')
+
+    @action(detail=True, methods=['post'])
+    def conciliar(self, request, pk=None):
+        """POST /cuentas-bancarias/{id}/conciliar/ — match automático entre movimientos y asientos."""
+        from decimal import Decimal as D
+
+        cuenta = self.get_object()
+        fecha_desde = request.data.get('fecha_desde')
+        fecha_hasta = request.data.get('fecha_hasta')
+        saldo_extracto = D(str(request.data.get('saldo_extracto', 0)))
+
+        if not fecha_desde or not fecha_hasta:
+            raise ValidationError('fecha_desde y fecha_hasta son requeridos.')
+
+        from datetime import date as dt_date
+        fecha_desde = dt_date.fromisoformat(fecha_desde)
+        fecha_hasta = dt_date.fromisoformat(fecha_hasta)
+
+        movimientos = MovimientoBancario.objects.filter(
+            cuenta=cuenta,
+            fecha__gte=fecha_desde,
+            fecha__lte=fecha_hasta,
+            conciliado=False,
+        )
+
+        # Try auto-match: find asientos with same amount and similar date
+        matched = 0
+        for mov in movimientos:
+            asiento = AsientoContable.objects.filter(
+                negocio=self.request.user.negocio,
+                estado='CONTABILIZADO',
+                fecha__gte=mov.fecha - timedelta(days=3),
+                fecha__lte=mov.fecha + timedelta(days=3),
+                total_debe=mov.monto if mov.tipo == 'DEBITO' else 0,
+                total_haber=mov.monto if mov.tipo == 'CREDITO' else 0,
+            ).first()
+
+            if asiento:
+                mov.conciliado = True
+                mov.asiento_contable = asiento
+                mov.save(update_fields=['conciliado', 'asiento_contable'])
+                matched += 1
+
+        # Calculate book balance
+        saldo_libros = cuenta.saldo
+
+        conciliacion = Conciliacion.objects.create(
+            cuenta_bancaria=cuenta,
+            fecha_desde=fecha_desde,
+            fecha_hasta=fecha_hasta,
+            saldo_extracto=saldo_extracto,
+            saldo_libros=saldo_libros,
+            diferencia=saldo_extracto - saldo_libros,
+            creado_por=request.user,
+        )
+
+        return Response({
+            'status': 'success',
+            'conciliacion_id': str(conciliacion.id),
+            'movimientos_conciliados': matched,
+            'movimientos_pendientes': movimientos.filter(conciliado=False).count(),
+            'diferencia': float(conciliacion.diferencia),
+        })

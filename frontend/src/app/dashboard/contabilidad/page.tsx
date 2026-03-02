@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { cuentaContableService } from "@/services/contabilidad";
+import { contabilidadService } from "@/services/bancos";
 
 interface CuentaContable {
   id: string;
@@ -40,6 +41,13 @@ export default function ContabilidadPage() {
     codigo: "", nombre: "", tipo: "ACTIVO", naturaleza: "DEUDORA",
     cuenta_padre: "", es_cuenta_detalle: true, activa: true
   });
+  const [activeTab, setActiveTab] = useState<"cuentas" | "balance" | "resultados">("cuentas");
+  const [balanceGeneral, setBalanceGeneral] = useState<any>(null);
+  const [estadoResultados, setEstadoResultados] = useState<any>(null);
+  const [fechaBalance, setFechaBalance] = useState(new Date().toISOString().split("T")[0]);
+  const [fechaDesde, setFechaDesde] = useState(`${new Date().getFullYear()}-01-01`);
+  const [fechaHasta, setFechaHasta] = useState(new Date().toISOString().split("T")[0]);
+  const [loadingEF, setLoadingEF] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -136,6 +144,24 @@ export default function ContabilidadPage() {
     setShowModal(true);
   };
 
+  const cargarBalanceGeneral = async () => {
+    setLoadingEF(true);
+    try {
+      const { data } = await contabilidadService.getBalanceGeneral(fechaBalance);
+      setBalanceGeneral(data);
+    } catch {}
+    setLoadingEF(false);
+  };
+
+  const cargarEstadoResultados = async () => {
+    setLoadingEF(true);
+    try {
+      const { data } = await contabilidadService.getEstadoResultados(fechaDesde, fechaHasta);
+      setEstadoResultados(data);
+    } catch {}
+    setLoadingEF(false);
+  };
+
   const formatCurrency = (n: number) => new Intl.NumberFormat('es-DO', { style: 'currency', currency: 'DOP' }).format(n);
   const esClaro = tema.texto === "#0f172a";
   const allFlat = flattenCuentas(cuentas);
@@ -217,33 +243,195 @@ export default function ContabilidadPage() {
         .empty-state { text-align:center; padding:60px 20px; color:${tema.subtexto}; }
         .loading { text-align:center; padding:60px; color:${tema.subtexto}; }
         .form-error { background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.18); border-radius:10px; padding:10px 14px; font-size:13px; color:#fca5a5; margin-bottom:16px; grid-column:1/-1; }
+        .ef-tabs { display:flex; gap:8px; margin-bottom:20px; }
+        .ef-tab { padding:8px 20px; border-radius:8px; border:1px solid ${tema.borde}; cursor:pointer; font-size:13px; background:transparent; color:${tema.subtexto}; transition:all 0.2s; font-family:'DM Sans',sans-serif; }
+        .ef-tab.active { background:linear-gradient(135deg,${tema.secondary},${tema.accent}); color:#fff; border-color:transparent; }
+        .ef-section { background:${tema.card}; border:1px solid ${tema.borde}; border-radius:16px; padding:24px; }
+        .ef-row { display:flex; justify-content:space-between; padding:8px 0; border-bottom:1px solid ${tema.borde}; font-size:13px; }
+        .ef-row.total { font-weight:700; font-size:15px; border-top:2px solid ${tema.accent}; margin-top:8px; padding-top:12px; }
+        .ef-group-title { font-weight:700; font-size:14px; margin:16px 0 8px; color:${tema.accent}; }
+        .ef-filter-row { display:flex; gap:12px; margin-bottom:16px; align-items:end; }
+        .ef-filter-row .form-group { margin-bottom:0; }
       `}</style>
 
       <div className="page">
         <div className="header">
           <div className="header-left">
             <button className="back-btn" onClick={() => window.location.href="/dashboard"}>Volver</button>
-            <h1 className="page-title"><span>Contabilidad</span> / Plan de Cuentas</h1>
+            <h1 className="page-title"><span>Contabilidad</span></h1>
           </div>
-          <button className="btn-primary" onClick={() => { resetForm(); setEditando(null); setShowModal(true); }}>+ Nueva Cuenta</button>
+          {activeTab === "cuentas" && (
+            <button className="btn-primary" onClick={() => { resetForm(); setEditando(null); setShowModal(true); }}>+ Nueva Cuenta</button>
+          )}
         </div>
 
-        <div className="stats-row">
-          {TIPOS_CUENTA.map(t => (
-            <div className="mini-stat" key={t}>
-              <div className="mini-stat-val">{allFlat.filter(c => c.tipo === t).length}</div>
-              <div className="mini-stat-label">{t}</div>
+        <div className="ef-tabs">
+          <button className={`ef-tab ${activeTab === "cuentas" ? "active" : ""}`}
+            onClick={() => setActiveTab("cuentas")}>Plan de Cuentas</button>
+          <button className={`ef-tab ${activeTab === "balance" ? "active" : ""}`}
+            onClick={() => { setActiveTab("balance"); if (!balanceGeneral) cargarBalanceGeneral(); }}>Balance General</button>
+          <button className={`ef-tab ${activeTab === "resultados" ? "active" : ""}`}
+            onClick={() => { setActiveTab("resultados"); if (!estadoResultados) cargarEstadoResultados(); }}>Estado de Resultados</button>
+        </div>
+
+        {activeTab === "cuentas" && (
+          <>
+            <div className="stats-row">
+              {TIPOS_CUENTA.map(t => (
+                <div className="mini-stat" key={t}>
+                  <div className="mini-stat-val">{allFlat.filter(c => c.tipo === t).length}</div>
+                  <div className="mini-stat-label">{t}</div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
 
-        {loading ? (
-          <div className="loading">Cargando plan de cuentas...</div>
-        ) : cuentas.length === 0 ? (
-          <div className="empty-state"><p>No hay cuentas contables. Cree la primera!</p></div>
-        ) : (
-          <div className="tree-wrap">
-            {cuentas.map(c => renderCuenta(c))}
+            {loading ? (
+              <div className="loading">Cargando plan de cuentas...</div>
+            ) : cuentas.length === 0 ? (
+              <div className="empty-state"><p>No hay cuentas contables. Cree la primera!</p></div>
+            ) : (
+              <div className="tree-wrap">
+                {cuentas.map(c => renderCuenta(c))}
+              </div>
+            )}
+          </>
+        )}
+
+        {activeTab === "balance" && (
+          <div className="ef-section">
+            <div className="ef-filter-row">
+              <div className="form-group">
+                <label className="form-label">Fecha de corte</label>
+                <input type="date" className="form-input" value={fechaBalance}
+                  onChange={(e) => setFechaBalance(e.target.value)} />
+              </div>
+              <button className="btn-primary" onClick={cargarBalanceGeneral}
+                disabled={loadingEF}>{loadingEF ? "Cargando..." : "Generar"}</button>
+            </div>
+
+            {balanceGeneral && (
+              <>
+                <div className="ef-group-title">Activos</div>
+                {balanceGeneral.activos.cuentas.map((c: any) => (
+                  <div className="ef-row" key={c.codigo}>
+                    <span>{c.codigo} - {c.nombre}</span>
+                    <span>{formatCurrency(c.saldo)}</span>
+                  </div>
+                ))}
+                <div className="ef-row total">
+                  <span>Total Activos</span>
+                  <span>{formatCurrency(balanceGeneral.activos.total)}</span>
+                </div>
+
+                <div className="ef-group-title">Pasivos</div>
+                {balanceGeneral.pasivos.cuentas.map((c: any) => (
+                  <div className="ef-row" key={c.codigo}>
+                    <span>{c.codigo} - {c.nombre}</span>
+                    <span>{formatCurrency(c.saldo)}</span>
+                  </div>
+                ))}
+                <div className="ef-row total">
+                  <span>Total Pasivos</span>
+                  <span>{formatCurrency(balanceGeneral.pasivos.total)}</span>
+                </div>
+
+                <div className="ef-group-title">Patrimonio</div>
+                {balanceGeneral.patrimonio.cuentas.map((c: any) => (
+                  <div className="ef-row" key={c.codigo}>
+                    <span>{c.codigo} - {c.nombre}</span>
+                    <span>{formatCurrency(c.saldo)}</span>
+                  </div>
+                ))}
+                <div className="ef-row total">
+                  <span>Total Patrimonio</span>
+                  <span>{formatCurrency(balanceGeneral.patrimonio.total)}</span>
+                </div>
+
+                <div className="ef-row total" style={{ marginTop: 16 }}>
+                  <span>Activos = Pasivos + Patrimonio</span>
+                  <span style={{ color: balanceGeneral.balance_cuadrado ? "#22c55e" : "#ef4444" }}>
+                    {balanceGeneral.balance_cuadrado ? "Cuadrado" : "Descuadrado"}
+                  </span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+        {activeTab === "resultados" && (
+          <div className="ef-section">
+            <div className="ef-filter-row">
+              <div className="form-group">
+                <label className="form-label">Desde</label>
+                <input type="date" className="form-input" value={fechaDesde}
+                  onChange={(e) => setFechaDesde(e.target.value)} />
+              </div>
+              <div className="form-group">
+                <label className="form-label">Hasta</label>
+                <input type="date" className="form-input" value={fechaHasta}
+                  onChange={(e) => setFechaHasta(e.target.value)} />
+              </div>
+              <button className="btn-primary" onClick={cargarEstadoResultados}
+                disabled={loadingEF}>{loadingEF ? "Cargando..." : "Generar"}</button>
+            </div>
+
+            {estadoResultados && (
+              <>
+                <div className="ef-group-title">Ingresos</div>
+                {estadoResultados.ingresos.cuentas.map((c: any) => (
+                  <div className="ef-row" key={c.codigo}>
+                    <span>{c.codigo} - {c.nombre}</span>
+                    <span>{formatCurrency(c.monto)}</span>
+                  </div>
+                ))}
+                <div className="ef-row total">
+                  <span>Total Ingresos</span>
+                  <span style={{ color: "#22c55e" }}>{formatCurrency(estadoResultados.ingresos.total)}</span>
+                </div>
+
+                <div className="ef-group-title">Costos</div>
+                {estadoResultados.costos.cuentas.map((c: any) => (
+                  <div className="ef-row" key={c.codigo}>
+                    <span>{c.codigo} - {c.nombre}</span>
+                    <span>{formatCurrency(c.monto)}</span>
+                  </div>
+                ))}
+                <div className="ef-row total">
+                  <span>Total Costos</span>
+                  <span style={{ color: "#ef4444" }}>{formatCurrency(estadoResultados.costos.total)}</span>
+                </div>
+
+                <div className="ef-row total" style={{ background: "rgba(14,165,233,0.05)", borderRadius: 8, padding: "12px 8px" }}>
+                  <span>Utilidad Bruta</span>
+                  <span>{formatCurrency(estadoResultados.utilidad_bruta)}</span>
+                </div>
+
+                <div className="ef-group-title">Gastos Operativos</div>
+                {estadoResultados.gastos.cuentas.map((c: any) => (
+                  <div className="ef-row" key={c.codigo}>
+                    <span>{c.codigo} - {c.nombre}</span>
+                    <span>{formatCurrency(c.monto)}</span>
+                  </div>
+                ))}
+                <div className="ef-row total">
+                  <span>Total Gastos</span>
+                  <span style={{ color: "#ef4444" }}>{formatCurrency(estadoResultados.gastos.total)}</span>
+                </div>
+
+                <div className="ef-row total" style={{
+                  background: estadoResultados.utilidad_neta >= 0 ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+                  borderRadius: 8, padding: "14px 8px", marginTop: 12,
+                }}>
+                  <span style={{ fontSize: 16 }}>Utilidad Neta</span>
+                  <span style={{
+                    fontSize: 18,
+                    color: estadoResultados.utilidad_neta >= 0 ? "#22c55e" : "#ef4444",
+                  }}>
+                    {formatCurrency(estadoResultados.utilidad_neta)}
+                  </span>
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>

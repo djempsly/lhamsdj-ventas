@@ -141,6 +141,14 @@ SIMPLE_JWT = {
     'UPDATE_LAST_LOGIN': True,
 }
 
+# --- FISCAL ENCRYPTION ---------------------------------------------------
+
+FISCAL_ENCRYPTION_KEY = os.getenv('FISCAL_ENCRYPTION_KEY', '')
+
+# --- AI ------------------------------------------------------------------
+
+ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
+
 # --- COOKIES -------------------------------------------------------------
 
 COOKIE_DOMAIN = os.getenv('COOKIE_DOMAIN', '') or None  # None = browser uses response origin

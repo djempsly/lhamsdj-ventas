@@ -4,7 +4,8 @@ from .models import (
     CuentaContable, PeriodoContable, AsientoContable, LineaAsiento,
     Categoria, Producto, Almacen, StockAlmacen, MovimientoInventario,
     Cliente, Proveedor, SecuenciaNCF, Venta, DetalleVenta,
-    Compra, DetalleCompra, CuentaBancaria, CuadreCaja, AnalisisAI
+    Compra, DetalleCompra, CuentaBancaria, CuadreCaja, AnalisisAI,
+    MovimientoBancario, Conciliacion,
 )
 
 
@@ -185,3 +186,113 @@ class AnalisisAISerializer(serializers.ModelSerializer):
     class Meta:
         model = AnalisisAI
         fields = '__all__'
+
+
+# =============================================================================
+# COMPRAS
+# =============================================================================
+
+class DetalleCompraSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+
+    class Meta:
+        model = DetalleCompra
+        fields = ['id', 'producto', 'producto_nombre', 'cantidad',
+                  'precio_unitario', 'subtotal', 'impuesto', 'total']
+
+
+class DetalleCompraWriteSerializer(serializers.Serializer):
+    producto = serializers.UUIDField()
+    cantidad = serializers.DecimalField(max_digits=12, decimal_places=2)
+    precio_unitario = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class CompraSerializer(serializers.ModelSerializer):
+    detalles = DetalleCompraSerializer(many=True, read_only=True)
+    detalles_input = DetalleCompraWriteSerializer(many=True, write_only=True, required=False)
+    proveedor_nombre = serializers.CharField(source='proveedor.nombre', read_only=True)
+
+    class Meta:
+        model = Compra
+        fields = [
+            'id', 'numero', 'proveedor', 'proveedor_nombre', 'almacen',
+            'ncf_proveedor', 'factura_proveedor', 'fecha', 'fecha_recepcion',
+            'fecha_pago', 'tipo_bienes_servicios', 'forma_pago',
+            'subtotal', 'total_impuestos', 'total',
+            'itbis_retenido', 'retencion_renta', 'tipo_retencion',
+            'estado', 'notas', 'detalles', 'detalles_input',
+        ]
+        read_only_fields = ['numero']
+
+    def create(self, validated_data):
+        detalles_data = validated_data.pop('detalles_input', [])
+        compra = Compra.objects.create(**validated_data)
+
+        subtotal_total = 0
+        impuestos_total = 0
+        for item in detalles_data:
+            producto = Producto.objects.get(pk=item['producto'])
+            cantidad = item['cantidad']
+            precio_unitario = item['precio_unitario']
+            subtotal = cantidad * precio_unitario
+            impuesto = subtotal * (producto.tasa_impuesto / 100) if producto.aplica_impuesto else 0
+            total_linea = subtotal + impuesto
+
+            DetalleCompra.objects.create(
+                compra=compra, producto=producto, cantidad=cantidad,
+                precio_unitario=precio_unitario, subtotal=subtotal,
+                impuesto=impuesto, total=total_linea,
+            )
+            subtotal_total += subtotal
+            impuestos_total += impuesto
+
+        if detalles_data:
+            compra.subtotal = subtotal_total
+            compra.total_impuestos = impuestos_total
+            compra.total = subtotal_total + impuestos_total
+            compra.save(update_fields=['subtotal', 'total_impuestos', 'total'])
+
+        return compra
+
+
+# =============================================================================
+# CONTABILIDAD - Período
+# =============================================================================
+
+class PeriodoContableSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PeriodoContable
+        fields = ['id', 'nombre', 'fecha_inicio', 'fecha_fin', 'estado',
+                  'cerrado_por', 'fecha_cierre']
+        read_only_fields = ['cerrado_por', 'fecha_cierre']
+
+
+# =============================================================================
+# RECONCILIACIÓN BANCARIA
+# =============================================================================
+
+class MovimientoBancarioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = MovimientoBancario
+        fields = ['id', 'cuenta', 'fecha', 'descripcion', 'referencia',
+                  'monto', 'tipo', 'saldo_posterior', 'conciliado',
+                  'asiento_contable', 'importado_de', 'creado_en']
+        read_only_fields = ['creado_en']
+
+
+class ConciliacionSerializer(serializers.ModelSerializer):
+    creado_por_nombre = serializers.CharField(source='creado_por.get_full_name', read_only=True)
+
+    class Meta:
+        model = Conciliacion
+        fields = ['id', 'cuenta_bancaria', 'fecha_desde', 'fecha_hasta',
+                  'saldo_extracto', 'saldo_libros', 'diferencia',
+                  'estado', 'creado_por', 'creado_por_nombre', 'fecha']
+        read_only_fields = ['creado_por', 'diferencia']
+
+
+class CuentaBancariaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CuentaBancaria
+        fields = ['id', 'banco', 'tipo', 'numero', 'moneda', 'saldo',
+                  'cuenta_contable', 'activa']

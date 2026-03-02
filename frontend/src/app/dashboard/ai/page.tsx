@@ -32,6 +32,7 @@ export default function AIPage() {
   const [tema, setTema] = useState(TEMA_DEFAULT);
   const [filtroTipo, setFiltroTipo] = useState("");
   const [detalle, setDetalle] = useState<AnalisisAI | null>(null);
+  const [generando, setGenerando] = useState(false);
 
   useEffect(() => {
     setMounted(true);
@@ -54,6 +55,15 @@ export default function AIPage() {
       const { data } = await analisisAIService.getById(id);
       setDetalle(data);
     } catch { /* interceptor */ }
+  };
+
+  const generarAnalisis = async (tipo: string) => {
+    setGenerando(true);
+    try {
+      await analisisAIService.generar({ tipo });
+      cargarDatos();
+    } catch { /* interceptor */ }
+    setGenerando(false);
   };
 
   const filtrados = filtroTipo
@@ -112,6 +122,10 @@ export default function AIPage() {
         .btn-cancel { background:none; border:1px solid ${tema.borde}; border-radius:10px; padding:10px 20px; color:${tema.subtexto}; font-size:14px; cursor:pointer; font-family:'DM Sans',sans-serif; }
         .empty-state { text-align:center; padding:60px 20px; color:${tema.subtexto}; }
         .loading { text-align:center; padding:60px; color:${tema.subtexto}; }
+        .btn-primary { background:linear-gradient(135deg, ${tema.secondary}, ${tema.accent}); border:none; border-radius:10px; padding:10px 20px; color:white; font-size:13px; font-weight:600; cursor:pointer; transition:all 0.2s; font-family:'Syne',sans-serif; box-shadow:0 4px 16px ${tema.accent}30; }
+        .btn-primary:hover { transform:translateY(-1px); }
+        .btn-primary:disabled { opacity:0.6; cursor:not-allowed; transform:none; }
+        .gen-btns { display:flex; gap:8px; }
       `}</style>
 
       <div className="page">
@@ -119,6 +133,19 @@ export default function AIPage() {
           <div className="header-left">
             <button className="back-btn" onClick={() => window.location.href="/dashboard"}>Volver</button>
             <h1 className="page-title"><span>AI</span> Agent / Analisis</h1>
+          </div>
+          <div className="gen-btns">
+            <button className="btn-primary" disabled={generando} onClick={() => generarAnalisis("INSIGHT")}>
+              {generando ? "Generando..." : "Analizar Ventas"}
+            </button>
+            <button className="btn-primary" disabled={generando} onClick={() => generarAnalisis("ANOMALIA")}
+              style={{ background: `linear-gradient(135deg, #dc2626, #f59e0b)` }}>
+              Detectar Anomalias
+            </button>
+            <button className="btn-primary" disabled={generando} onClick={() => generarAnalisis("RECOMENDACION")}
+              style={{ background: `linear-gradient(135deg, #059669, #10b981)` }}>
+              Recomendaciones
+            </button>
           </div>
         </div>
 

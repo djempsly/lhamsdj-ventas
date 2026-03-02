@@ -100,16 +100,27 @@ class Negocio(models.Model):
     # Configuración contable
     plan_cuentas_activo = models.BooleanField(default=True)
     cierre_automatico = models.BooleanField(default=False)
-    
+
     # Metadatos
     creado_en = models.DateTimeField(auto_now_add=True)
     actualizado_en = models.DateTimeField(auto_now=True)
-    
+
     def save(self, *args, **kwargs):
         if not self.codigo_licencia:
             self.codigo_licencia = f"POS-{datetime.now().year}-{str(uuid.uuid4())[:8].upper()}"
         super().save(*args, **kwargs)
-    
+
+    @property
+    def api_fiscal_clave_decrypted(self):
+        """Descifra la clave fiscal al leer."""
+        if not self.api_fiscal_clave:
+            return ''
+        try:
+            from .utils.crypto import decrypt_value
+            return decrypt_value(self.api_fiscal_clave)
+        except Exception:
+            return self.api_fiscal_clave
+
     def __str__(self):
         return self.nombre_comercial
 
@@ -737,10 +748,17 @@ class Venta(models.Model):
     
     # Contabilidad
     asiento = models.ForeignKey(AsientoContable, on_delete=models.SET_NULL, null=True, blank=True)
-    
+
+    # Referencia para notas de crédito/débito
+    venta_referencia = models.ForeignKey(
+        'self', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='notas_credito_debito',
+        help_text="Venta original referenciada por nota de crédito/débito"
+    )
+
     notas = models.TextField(blank=True)
     creado_en = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         ordering = ['-fecha']
         indexes = [
@@ -748,7 +766,7 @@ class Venta(models.Model):
             models.Index(fields=['negocio', 'ncf']),
             models.Index(fields=['negocio', 'cliente']),
         ]
-    
+
     def __str__(self):
         return f"{self.numero} - RD${self.total}"
 
@@ -797,26 +815,62 @@ class Compra(models.Model):
         ('RECIBIDA', 'Recibida'),
         ('ANULADA', 'Anulada'),
     ]
-    
+    TIPO_BIENES_SERVICIOS = [
+        ('01', '01 - Gastos de Personal'),
+        ('02', '02 - Gastos por Trabajos, Suministros y Servicios'),
+        ('03', '03 - Arrendamientos'),
+        ('04', '04 - Gastos de Activos Fijos'),
+        ('05', '05 - Gastos de Representación'),
+        ('06', '06 - Otras Deducciones Admitidas'),
+        ('07', '07 - Gastos Financieros'),
+        ('08', '08 - Gastos Extraordinarios'),
+        ('09', '09 - Compras y Gastos que forman parte del Costo de Venta'),
+        ('10', '10 - Adquisiciones de Activos'),
+        ('11', '11 - Gastos de Seguros'),
+        ('12', '12 - Otros Gastos'),
+        ('13', '13 - Compra de bienes'),
+    ]
+    FORMA_PAGO_CHOICES = [
+        ('EFECTIVO', 'Efectivo'),
+        ('CHEQUE', 'Cheque/Transferencia'),
+        ('TRANSFERENCIA', 'Transferencia'),
+        ('TARJETA', 'Tarjeta'),
+        ('CREDITO', 'A Crédito'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
     proveedor = models.ForeignKey(Proveedor, on_delete=models.PROTECT)
     almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT)
-    
+
     numero = models.CharField(max_length=20)
     ncf_proveedor = models.CharField(max_length=19, blank=True)
     factura_proveedor = models.CharField(max_length=50, blank=True)
-    
+
     fecha = models.DateField()
     fecha_recepcion = models.DateField(null=True, blank=True)
-    
+    fecha_pago = models.DateField(null=True, blank=True)
+
+    # Clasificación DGII
+    tipo_bienes_servicios = models.CharField(
+        max_length=2, choices=TIPO_BIENES_SERVICIOS, default='02',
+    )
+    forma_pago = models.CharField(
+        max_length=15, choices=FORMA_PAGO_CHOICES, default='CREDITO',
+    )
+
     subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total_impuestos = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
-    
+
+    # Retenciones
+    itbis_retenido = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    retencion_renta = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    tipo_retencion = models.CharField(max_length=20, blank=True, help_text="Según norma 07-2007")
+
     estado = models.CharField(max_length=15, choices=ESTADO, default='BORRADOR')
     asiento = models.ForeignKey(AsientoContable, on_delete=models.SET_NULL, null=True, blank=True)
-    
+
     notas = models.TextField(blank=True)
     creado_en = models.DateTimeField(auto_now_add=True)
 
@@ -918,8 +972,75 @@ class AnalisisAI(models.Model):
     confianza = models.DecimalField(max_digits=5, decimal_places=2, null=True)  # 0-100
     accionable = models.BooleanField(default=False)
     leido = models.BooleanField(default=False)
-    
+
     fecha = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         ordering = ['-fecha']
+
+
+# =============================================================================
+# RECONCILIACIÓN BANCARIA
+# =============================================================================
+
+class MovimientoBancario(models.Model):
+    """Movimientos importados de extractos bancarios"""
+    TIPO = [
+        ('DEBITO', 'Débito'),
+        ('CREDITO', 'Crédito'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cuenta = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name='movimientos')
+
+    fecha = models.DateField()
+    descripcion = models.CharField(max_length=300)
+    referencia = models.CharField(max_length=100, blank=True)
+    monto = models.DecimalField(max_digits=15, decimal_places=2)
+    tipo = models.CharField(max_length=7, choices=TIPO)
+    saldo_posterior = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+
+    conciliado = models.BooleanField(default=False)
+    asiento_contable = models.ForeignKey(
+        AsientoContable, on_delete=models.SET_NULL, null=True, blank=True,
+    )
+    importado_de = models.CharField(max_length=100, blank=True, help_text="Fuente del extracto")
+
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha', '-creado_en']
+        indexes = [
+            models.Index(fields=['cuenta', 'fecha']),
+            models.Index(fields=['cuenta', 'conciliado']),
+        ]
+
+    def __str__(self):
+        return f"{self.fecha} - {self.descripcion} - {self.monto}"
+
+
+class Conciliacion(models.Model):
+    """Registro de conciliaciones bancarias"""
+    ESTADO = [
+        ('BORRADOR', 'Borrador'),
+        ('COMPLETADA', 'Completada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name='conciliaciones')
+
+    fecha_desde = models.DateField()
+    fecha_hasta = models.DateField()
+    saldo_extracto = models.DecimalField(max_digits=15, decimal_places=2)
+    saldo_libros = models.DecimalField(max_digits=15, decimal_places=2)
+    diferencia = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+
+    estado = models.CharField(max_length=12, choices=ESTADO, default='BORRADOR')
+    creado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True)
+    fecha = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha']
+
+    def __str__(self):
+        return f"Conciliación {self.cuenta_bancaria} ({self.fecha_desde} - {self.fecha_hasta})"

@@ -1,7 +1,7 @@
 import logging
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
-from .models import Venta, Producto, FacturaElectronica, AuditLog
+from .models import Venta, Compra, Producto, FacturaElectronica, AuditLog
 
 logger = logging.getLogger('audit')
 
@@ -34,6 +34,16 @@ def audit_venta_update(sender, instance, **kwargs):
             datos_anteriores=changes,
         )
 
+    # Auto-create accounting entry when sale is completed
+    if (changes.get('estado') and
+            changes['estado']['new'] == 'COMPLETADA' and
+            changes['estado']['old'] != 'COMPLETADA'):
+        try:
+            from .utils.contabilidad import crear_asiento_venta
+            crear_asiento_venta(instance)
+        except Exception as e:
+            logger.error('Error creando asiento para venta %s: %s', instance.numero, e)
+
 
 @receiver(post_save, sender=Venta)
 def audit_venta_create(sender, instance, created, **kwargs):
@@ -48,6 +58,15 @@ def audit_venta_create(sender, instance, created, **kwargs):
             descripcion=f'Venta {instance.numero} creada - Total: {instance.total}',
             datos_nuevos={'total': str(instance.total), 'ncf': instance.ncf},
         )
+
+        # If created directly as COMPLETADA, create accounting entry
+        if instance.estado == 'COMPLETADA':
+            try:
+                from .utils.contabilidad import crear_asiento_venta
+                if not instance.asiento:
+                    crear_asiento_venta(instance)
+            except Exception as e:
+                logger.error('Error creando asiento para venta nueva %s: %s', instance.numero, e)
 
 
 @receiver(post_save, sender=FacturaElectronica)
@@ -94,3 +113,21 @@ def audit_producto_price_change(sender, instance, **kwargs):
             descripcion=f'Producto {instance.nombre} modificado',
             datos_anteriores=changes,
         )
+
+
+@receiver(pre_save, sender=Compra)
+def auto_asiento_compra(sender, instance, **kwargs):
+    """Auto-create accounting entry when purchase is received."""
+    if not instance.pk:
+        return
+    try:
+        old = Compra.objects.get(pk=instance.pk)
+    except Compra.DoesNotExist:
+        return
+
+    if old.estado != 'RECIBIDA' and instance.estado == 'RECIBIDA':
+        try:
+            from .utils.contabilidad import crear_asiento_compra
+            crear_asiento_compra(instance)
+        except Exception as e:
+            logger.error('Error creando asiento para compra %s: %s', instance.numero, e)
