@@ -2,6 +2,8 @@
 import { useState } from "react";
 import Image from "next/image";
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
+
 export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -11,25 +13,43 @@ export default function LoginPage() {
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    // Client-side validation
+    const trimmedUser = username.trim();
+    if (!trimmedUser || !password) {
+      setError("Complete todos los campos");
+      return;
+    }
+    if (trimmedUser.length > 150 || password.length > 128) {
+      setError("Datos invalidos");
+      return;
+    }
+
     setLoading(true);
     setError("");
+
     try {
-      const res = await fetch("http://127.0.0.1:8000/api/auth/login/", {
+      const res = await fetch(`${API_URL}/auth/login/`, {
         method: "POST",
+        credentials: "include", // Receive httpOnly cookies from backend
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username, password }),
+        body: JSON.stringify({ username: trimmedUser, password }),
       });
       const data = await res.json();
+
       if (res.ok) {
-        localStorage.setItem("access_token", data.access);
-        localStorage.setItem("refresh_token", data.refresh);
-        localStorage.setItem("usuario", JSON.stringify(data.usuario));
+        // Only store non-sensitive display data (tokens are in httpOnly cookies)
+        if (data.usuario) {
+          localStorage.setItem("usuario", JSON.stringify(data.usuario));
+        }
         window.location.href = "/dashboard";
+      } else if (res.status === 429) {
+        setError(data.detail || "Demasiados intentos. Espere unos minutos.");
       } else {
-        setError("Usuario o contraseña incorrectos");
+        setError(data.detail || "Usuario o contrasena incorrectos");
       }
     } catch {
-      setError("Error de conexión con el servidor");
+      setError("Error de conexion con el servidor");
     } finally {
       setLoading(false);
     }
@@ -52,7 +72,7 @@ export default function LoginPage() {
 
         .grid-pattern {
           position: absolute; inset: 0;
-          background-image: 
+          background-image:
             linear-gradient(rgba(30,90,160,0.04) 1px, transparent 1px),
             linear-gradient(90deg, rgba(30,90,160,0.04) 1px, transparent 1px);
           background-size: 60px 60px;
@@ -282,17 +302,17 @@ export default function LoginPage() {
           </h1>
 
           <p className="hero-desc">
-            Gestiona ventas, inventario y contabilidad con inteligencia artificial. 
+            Gestiona ventas, inventario y contabilidad con inteligencia artificial.
             Diseñado para superar a Alegra y los mejores sistemas del mercado.
           </p>
 
           <div className="features">
             {[
-              "Punto de venta ultrarrápido con búsqueda instantánea",
-              "Dashboard con análisis AI en tiempo real",
-              "Facturación electrónica DGII integrada",
+              "Punto de venta ultrarapido con busqueda instantanea",
+              "Dashboard con analisis AI en tiempo real",
+              "Facturacion electronica DGII integrada",
               "Motor contable completo con reportes financieros",
-              "Seguridad empresarial con auditoría de acciones",
+              "Seguridad empresarial con auditoria de acciones",
             ].map((f, i) => (
               <div className="feature-item" key={i}>
                 <div className="feature-dot" />
@@ -308,45 +328,49 @@ export default function LoginPage() {
         <div className="right-panel">
           <div className="form-card">
             <Image src="/logo.png" alt="Logo" width={60} height={60} className="card-logo" />
-            <h2 className="form-title">Iniciar Sesión</h2>
+            <h2 className="form-title">Iniciar Sesion</h2>
             <p className="form-subtitle">Accede a tu panel de control</p>
 
             <form onSubmit={handleLogin}>
               {error && (
                 <div className="error-box">
-                  <span>⚠️</span> {error}
+                  <span>!</span> <span>{String(error).substring(0, 200)}</span>
                 </div>
               )}
 
               <div className="form-group">
                 <label className="form-label">Usuario</label>
                 <div className="input-wrap">
-                  <span className="input-icon">👤</span>
+                  <span className="input-icon">U</span>
                   <input
                     className="form-input"
                     type="text"
                     placeholder="Escribe tu usuario"
                     value={username}
                     onChange={e => setUsername(e.target.value)}
+                    maxLength={150}
+                    autoComplete="username"
                     required
                   />
                 </div>
               </div>
 
               <div className="form-group">
-                <label className="form-label">Contraseña</label>
+                <label className="form-label">Contrasena</label>
                 <div className="input-wrap">
-                  <span className="input-icon">🔑</span>
+                  <span className="input-icon">K</span>
                   <input
                     className="form-input"
                     type={showPassword ? "text" : "password"}
-                    placeholder="Escribe tu contraseña"
+                    placeholder="Escribe tu contrasena"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
+                    maxLength={128}
+                    autoComplete="current-password"
                     required
                   />
                   <button type="button" className="eye-btn" onClick={() => setShowPassword(!showPassword)}>
-                    {showPassword ? "🙈" : "👁️"}
+                    {showPassword ? "x" : "o"}
                   </button>
                 </div>
               </div>
@@ -354,12 +378,12 @@ export default function LoginPage() {
               <button className="btn-submit" type="submit" disabled={loading}>
                 {loading
                   ? <><span className="spinner" />Verificando...</>
-                  : "Entrar al Sistema →"
+                  : "Entrar al Sistema"
                 }
               </button>
             </form>
 
-            <p className="footer-text">© 2026 L&apos;hams DJ · Todos los derechos reservados</p>
+            <p className="footer-text">&copy; 2026 L&apos;hams DJ - Todos los derechos reservados</p>
           </div>
         </div>
       </div>

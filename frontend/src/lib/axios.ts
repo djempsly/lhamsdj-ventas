@@ -1,59 +1,65 @@
 import axios from "axios";
 
-const BASE_URL = "http://127.0.0.1:8000/api";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
 
 const api = axios.create({
-  baseURL: BASE_URL,
+  baseURL: API_URL,
+  withCredentials: true, // Send httpOnly cookies with every request
   headers: {
     "Content-Type": "application/json",
   },
+  timeout: 30000,
 });
 
-// Interceptor para inyectar el token en cada petición
-api.interceptors.request.use(
-  (config) => {
-    const token = localStorage.getItem("access_token");
-    if (token) {
-      config.headers.Authorization = `Bearer ${token}`;
-    }
-    return config;
-  },
-  (error) => Promise.reject(error)
-);
+// Response interceptor: on 401, attempt token refresh via cookie
+let isRefreshing = false;
+let failedQueue: Array<{
+  resolve: (v: unknown) => void;
+  reject: (e: unknown) => void;
+}> = [];
 
-// Interceptor para manejar errores (Token expirado -> Logout o Refresh)
+const processQueue = (error: unknown) => {
+  failedQueue.forEach((prom) => {
+    if (error) {
+      prom.reject(error);
+    } else {
+      prom.resolve(undefined);
+    }
+  });
+  failedQueue = [];
+};
+
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
     const originalRequest = error.config;
-    
-    // Si es error 401 y no hemos reintentado aún
+
     if (error.response?.status === 401 && !originalRequest._retry) {
+      if (isRefreshing) {
+        return new Promise((resolve, reject) => {
+          failedQueue.push({ resolve, reject });
+        }).then(() => api(originalRequest));
+      }
+
       originalRequest._retry = true;
-      
-      const refreshToken = localStorage.getItem("refresh_token");
-      if (refreshToken) {
-        try {
-          const { data } = await axios.post(`${BASE_URL}/auth/refresh/`, {
-            refresh: refreshToken
-          });
-          
-          localStorage.setItem("access_token", data.access);
-          api.defaults.headers.common["Authorization"] = `Bearer ${data.access}`;
-          originalRequest.headers["Authorization"] = `Bearer ${data.access}`;
-          
-          return api(originalRequest);
-        } catch (refreshError) {
-          // Si el refresh falla, logout forzado
-          console.error("Sesión expirada", refreshError);
-          localStorage.clear();
-          window.location.href = "/";
-        }
-      } else {
-        localStorage.clear();
+      isRefreshing = true;
+
+      try {
+        await axios.post(`${API_URL}/auth/refresh/`, {}, { withCredentials: true });
+        processQueue(null);
+        return api(originalRequest);
+      } catch (refreshError) {
+        processQueue(refreshError);
+        // Session expired - clean up and redirect
+        localStorage.removeItem("usuario");
+        localStorage.removeItem("tema");
         window.location.href = "/";
+        return Promise.reject(refreshError);
+      } finally {
+        isRefreshing = false;
       }
     }
+
     return Promise.reject(error);
   }
 );

@@ -1,9 +1,10 @@
 "use client";
 import { useEffect, useState } from "react";
 import { posService } from "@/services/fiscal";
+import api from "@/lib/axios";
 
 const TEMAS = [
-  { nombre: "Océano",  bg: "#03080f", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#0ea5e9", secondary: "#1d4ed8" },
+  { nombre: "Oceano",  bg: "#03080f", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#0ea5e9", secondary: "#1d4ed8" },
   { nombre: "Bosque",  bg: "#030f08", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#10b981", secondary: "#065f46" },
   { nombre: "Fuego",   bg: "#0f0503", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#f97316", secondary: "#dc2626" },
   { nombre: "Galaxia", bg: "#05030f", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#8b5cf6", secondary: "#6d28d9" },
@@ -29,17 +30,24 @@ export default function Dashboard() {
   useEffect(() => {
     const u = localStorage.getItem("usuario");
     if (!u) { window.location.href = "/"; return; }
-    setUsuario(JSON.parse(u));
+    try {
+      setUsuario(JSON.parse(u));
+    } catch {
+      localStorage.removeItem("usuario");
+      window.location.href = "/";
+      return;
+    }
     const temaGuardado = localStorage.getItem("tema");
-    if (temaGuardado) setTema(JSON.parse(temaGuardado));
+    if (temaGuardado) {
+      try { setTema(JSON.parse(temaGuardado)); } catch { /* use default */ }
+    }
 
-    // Cargar datos reales
     const fetchStats = async () => {
       try {
         const { data } = await posService.getDashboard();
         setStats(data);
-      } catch (error) {
-        console.error("Error cargando dashboard", error);
+      } catch {
+        // API error handled by interceptor
       } finally {
         setLoading(false);
       }
@@ -53,8 +61,14 @@ export default function Dashboard() {
     setShowTemas(false);
   };
 
-  const cerrarSesion = () => {
-    localStorage.clear();
+  const cerrarSesion = async () => {
+    try {
+      await api.post("/auth/logout/");
+    } catch {
+      // Ignore - cookies will be cleared server-side or expire
+    }
+    localStorage.removeItem("usuario");
+    localStorage.removeItem("tema");
     window.location.href = "/";
   };
 
@@ -215,7 +229,7 @@ export default function Dashboard() {
             <div style={{position:"relative"}}>
               <button className="btn-tema" onClick={() => setShowTemas(!showTemas)}>
                 <div className="tema-dot" />
-                {tema.nombre} <span style={{fontSize:10}}>▼</span>
+                {tema.nombre} <span style={{fontSize:10}}>v</span>
               </button>
               {showTemas && (
                 <div className="temas-dropdown">
@@ -234,39 +248,39 @@ export default function Dashboard() {
 
         <main className="main">
           <h1 className="welcome-text">
-            Hola, <span>{usuario?.nombre}</span> 👋
-            <span className="rol-badge">⭐ {usuario?.rol?.replace("_", " ")}</span>
+            Hola, <span>{usuario?.nombre}</span>
+            <span className="rol-badge">{usuario?.rol?.replace("_", " ")}</span>
           </h1>
-          <p className="welcome-sub">Aquí está el resumen de tu negocio hoy</p>
+          <p className="welcome-sub">Aqui esta el resumen de tu negocio hoy</p>
 
           <div className="stats-grid">
             {[
-              { icon:"💰", value: loading ? "..." : formatCurrency(stats.total_ventas), label:"Ventas de hoy" },
-              { icon:"🛒", value: loading ? "..." : stats.cantidad_ventas,    label:"Transacciones" },
-              { icon:"📈", value: loading ? "..." : (stats.total_ganancia !== null ? formatCurrency(stats.total_ganancia) : "---"), label:"Ganancia Estimada" },
-              { icon:"🎟️", value: loading ? "..." : formatCurrency(stats.ticket_promedio),    label:"Ticket Promedio" },
+              { icon:"$", value: loading ? "..." : formatCurrency(stats.total_ventas), label:"Ventas de hoy" },
+              { icon:"#", value: loading ? "..." : stats.cantidad_ventas,    label:"Transacciones" },
+              { icon:"+", value: loading ? "..." : (stats.total_ganancia !== null ? formatCurrency(stats.total_ganancia) : "---"), label:"Ganancia Estimada" },
+              { icon:"~", value: loading ? "..." : formatCurrency(stats.ticket_promedio),    label:"Ticket Promedio" },
             ].map((s,i) => (
               <div className="stat-card" key={i}>
                 <div className="stat-icon">{s.icon}</div>
                 <div className="stat-value">{s.value}</div>
                 <div className="stat-label">{s.label}</div>
-                <div className="stat-change">↑ Actualizado hoy</div>
+                <div className="stat-change">Actualizado hoy</div>
               </div>
             ))}
           </div>
 
-          <div className="section-title">Módulos del sistema</div>
+          <div className="section-title">Modulos del sistema</div>
           <div className="menu-grid">
             {[
-              { emoji:"🛒", name:"Punto de Venta",  desc:"Registrar ventas", link: "/dashboard/pos" },
-              { emoji:"📦", name:"Inventario",       desc:"Productos y stock", link: "/dashboard/productos" },
-              { emoji:"👥", name:"Clientes",         desc:"Gestión de clientes", link: "/dashboard/clientes" },
-              { emoji:"🏭", name:"Proveedores",      desc:"Gestión de compras", link: "/dashboard/proveedores" },
-              { emoji:"🧾", name:"Facturación",      desc:"e-CF DGII", link: "/dashboard/pos" },
-              { emoji:"📊", name:"Reportes",         desc:"Análisis y estadísticas", link: "/dashboard/reportes" },
-              { emoji:"🧮", name:"Contabilidad",     desc:"Motor contable", link: "/dashboard/contabilidad" },
-              { emoji:"🤖", name:"AI Agent",         desc:"Análisis inteligente", link: "/dashboard/ai" },
-              { emoji:"⚙️", name:"Configuración",   desc:"Ajustes del sistema", link: "/dashboard/settings" },
+              { emoji:"POS", name:"Punto de Venta",  desc:"Registrar ventas", link: "/dashboard/pos" },
+              { emoji:"INV", name:"Inventario",       desc:"Productos y stock", link: "/dashboard/productos" },
+              { emoji:"CLI", name:"Clientes",         desc:"Gestion de clientes", link: "/dashboard/clientes" },
+              { emoji:"PRV", name:"Proveedores",      desc:"Gestion de compras", link: "/dashboard/proveedores" },
+              { emoji:"FAC", name:"Facturacion",      desc:"e-CF DGII", link: "/dashboard/pos" },
+              { emoji:"RPT", name:"Reportes",         desc:"Analisis y estadisticas", link: "/dashboard/reportes" },
+              { emoji:"CTB", name:"Contabilidad",     desc:"Motor contable", link: "/dashboard/contabilidad" },
+              { emoji:"AI",  name:"AI Agent",         desc:"Analisis inteligente", link: "/dashboard/ai" },
+              { emoji:"CFG", name:"Configuracion",    desc:"Ajustes del sistema", link: "/dashboard/settings" },
             ].map((m,i) => (
               <div className="menu-item" key={i} onClick={() => window.location.href = m.link}>
                 <div className="menu-emoji">{m.emoji}</div>

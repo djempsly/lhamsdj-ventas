@@ -1,6 +1,5 @@
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from rest_framework_simplejwt.views import TokenRefreshView
 from . import views
 
 router = DefaultRouter()
@@ -21,6 +20,7 @@ router.register(r'analisis-ai', views.AnalisisAIViewSet, basename='analisis-ai')
 
 urlpatterns = [
     path('auth/login/', views.CustomLoginView.as_view(), name='login'),
-    path('auth/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/refresh/', views.CookieTokenRefreshView.as_view(), name='token_refresh'),
+    path('auth/logout/', views.LogoutView.as_view(), name='logout'),
     path('', include(router.urls)),
 ]

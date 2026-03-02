@@ -157,8 +157,7 @@ class DGIIDominicanaStrategy(FiscalStrategy):
                 ])
                 content.append(line)
             
-            return "
-".join(content), filename, "text/plain"
+            return "\n".join(content), filename, "text/plain"
 
         elif tipo_reporte == '606':
             data = self.generar_reporte_compras(year, month)
@@ -183,8 +182,7 @@ class DGIIDominicanaStrategy(FiscalStrategy):
                 ])
                 content.append(line)
 
-            return "
-".join(content), filename, "text/plain"
+            return "\n".join(content), filename, "text/plain"
         
         else:
             raise ValueError(f"Reporte {tipo_reporte} no soportado para DGII")

@@ -1,9 +1,11 @@
 # Python / Django
 backend/venv/
-backend/__pycache__/
-backend/*.pyc
+**/__pycache__/
+*.pyc
+*.pyo
 backend/db.sqlite3
 backend/.env
+backend/logs/*.log
 
 # Node / Next.js
 frontend/node_modules/
@@ -13,3 +15,13 @@ frontend/.env.local
 # General
 .DS_Store
 *.log
+*.swp
+*.swo
+*~
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db

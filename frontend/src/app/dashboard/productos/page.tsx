@@ -36,6 +36,8 @@ export default function ProductosPage() {
   const [editando, setEditando] = useState<Producto | null>(null);
   const [mounted, setMounted] = useState(false);
   const [tema, setTema] = useState(TEMA_DEFAULT);
+  const [formError, setFormError] = useState("");
+  const [saving, setSaving] = useState(false);
   const [form, setForm] = useState({
     nombre: "", codigo_barras: "", precio_costo: "", precio_venta: "",
     stock_actual: "", stock_minimo: "", categoria: "", unidad_medida: "UNIDAD",
@@ -45,7 +47,9 @@ export default function ProductosPage() {
   useEffect(() => {
     setMounted(true);
     const temaGuardado = localStorage.getItem("tema");
-    if (temaGuardado) setTema(JSON.parse(temaGuardado));
+    if (temaGuardado) {
+      try { setTema(JSON.parse(temaGuardado)); } catch { /* use default */ }
+    }
     cargarDatos();
   }, []);
 
@@ -58,43 +62,92 @@ export default function ProductosPage() {
       ]);
       if (pRes?.ok) { const d = await pRes.json(); setProductos(Array.isArray(d) ? d : d.results || []); }
       if (cRes?.ok) { const d = await cRes.json(); setCategorias(Array.isArray(d) ? d : d.results || []); }
-    } catch (e) { console.error(e); }
+    } catch {
+      // Handled by interceptor
+    }
     setLoading(false);
   };
 
+  // --- Input Validation ---
+  const validateForm = (): string | null => {
+    const nombre = form.nombre.trim();
+    if (!nombre) return "El nombre del producto es requerido.";
+    if (nombre.length > 200) return "El nombre es muy largo (max 200 caracteres).";
+
+    const costo = parseFloat(form.precio_costo);
+    const venta = parseFloat(form.precio_venta);
+    const stock = parseFloat(form.stock_actual);
+    const stockMin = parseFloat(form.stock_minimo);
+
+    if (isNaN(costo) || costo < 0) return "Precio de costo invalido.";
+    if (isNaN(venta) || venta <= 0) return "Precio de venta debe ser mayor a 0.";
+    if (venta < costo) return "Precio de venta no puede ser menor al costo.";
+    if (isNaN(stock) || stock < 0) return "Stock actual invalido.";
+    if (isNaN(stockMin) || stockMin < 0) return "Stock minimo invalido.";
+    if (costo > 99999999 || venta > 99999999) return "Precio fuera de rango permitido.";
+
+    return null;
+  };
+
   const guardarProducto = async () => {
+    const error = validateForm();
+    if (error) {
+      setFormError(error);
+      return;
+    }
+    setFormError("");
+    setSaving(true);
+
     try {
-      const data = {codigo_barras: form.codigo_barras || `PROD-${Date.now()}`,
-        ...form,
+      const data = {
+        codigo_barras: form.codigo_barras.trim() || `PROD-${Date.now()}`,
+        nombre: form.nombre.trim(),
         precio_costo: parseFloat(form.precio_costo),
         precio_venta: parseFloat(form.precio_venta),
         stock_actual: parseFloat(form.stock_actual),
         stock_minimo: parseFloat(form.stock_minimo),
+        categoria: form.categoria || null,
+        unidad_medida: form.unidad_medida,
+        aplica_impuesto: form.aplica_impuesto,
         tasa_impuesto: parseFloat(form.tasa_impuesto),
       };
       const res = editando
         ? await api.put(`/productos/${editando.id}/`, data)
         : await api.post("/productos/", data);
-      const errorData = await res?.json(); console.log("ERROR BACKEND:", errorData); if (res?.ok) {
+
+      if (res?.ok) {
         setShowModal(false);
         setEditando(null);
         resetForm();
         cargarDatos();
+      } else {
+        const errorData = await res?.json().catch(() => ({}));
+        const msg = typeof errorData === 'object'
+          ? Object.values(errorData).flat().join('. ')
+          : 'Error al guardar';
+        setFormError(String(msg).substring(0, 200));
       }
-    } catch (e) { console.error(e); }
+    } catch {
+      setFormError("Error de conexion. Intente nuevamente.");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const eliminarProducto = async (id: string) => {
-    if (!confirm("¿Eliminar este producto?")) return;
+    if (!confirm("Desactivar este producto?")) return;
     await api.patch(`/productos/${id}/`, { activo: false });
     cargarDatos();
   };
 
-  const resetForm = () => setForm({
-    nombre: "", codigo_barras: "", precio_costo: "", precio_venta: "",
-    stock_actual: "", stock_minimo: "", categoria: "", unidad_medida: "UNIDAD",
-    aplica_impuesto: true, tasa_impuesto: "18"
-  });
+  const resetForm = () => {
+    setForm({
+      nombre: "", codigo_barras: "", precio_costo: "", precio_venta: "",
+      stock_actual: "", stock_minimo: "", categoria: "", unidad_medida: "UNIDAD",
+      aplica_impuesto: true, tasa_impuesto: "18"
+    });
+    setFormError("");
+  };
 
   const abrirEditar = (p: Producto) => {
     setEditando(p);
@@ -104,6 +157,7 @@ export default function ProductosPage() {
       stock_actual: String(p.stock_actual), stock_minimo: String(p.stock_minimo),
       categoria: "", unidad_medida: "UNIDAD", aplica_impuesto: true, tasa_impuesto: "18"
     });
+    setFormError("");
     setShowModal(true);
   };
 
@@ -149,6 +203,7 @@ export default function ProductosPage() {
           box-shadow:0 4px 16px ${tema.accent}30;
         }
         .btn-primary:hover { transform:translateY(-1px); box-shadow:0 8px 24px ${tema.accent}40; }
+        .btn-primary:disabled { opacity:0.6; cursor:not-allowed; transform:none; }
         .stats-row { display:flex; gap:12px; margin-bottom:24px; flex-wrap:wrap; }
         .mini-stat {
           background:${tema.card}; border:1px solid ${tema.borde};
@@ -216,13 +271,18 @@ export default function ProductosPage() {
         .empty-state { text-align:center; padding:60px 20px; color:${tema.subtexto}; }
         .empty-icon { font-size:48px; margin-bottom:12px; }
         .loading { text-align:center; padding:60px; color:${tema.subtexto}; }
+        .form-error {
+          background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.18);
+          border-radius:10px; padding:10px 14px; font-size:13px; color:#fca5a5;
+          margin-bottom:16px; grid-column:1/-1;
+        }
       `}</style>
 
       <div className="page">
         <div className="header">
           <div className="header-left">
-            <button className="back-btn" onClick={() => window.location.href="/dashboard"}>← Volver</button>
-            <h1 className="page-title">📦 <span>Inventario</span> / Productos</h1>
+            <button className="back-btn" onClick={() => window.location.href="/dashboard"}>Volver</button>
+            <h1 className="page-title"><span>Inventario</span> / Productos</h1>
           </div>
           <button className="btn-primary" onClick={() => { resetForm(); setEditando(null); setShowModal(true); }}>
             + Nuevo Producto
@@ -232,8 +292,8 @@ export default function ProductosPage() {
         <div className="stats-row">
           {[
             { val: productos.length, label: "Total productos" },
-            { val: productos.filter(p => p.stock_actual <= p.stock_minimo).length, label: "Stock bajo ⚠️" },
-            { val: categorias.length, label: "Categorías" },
+            { val: productos.filter(p => p.stock_actual <= p.stock_minimo).length, label: "Stock bajo" },
+            { val: categorias.length, label: "Categorias" },
             { val: `RD$${productos.reduce((a,p) => a + (p.stock_actual * p.precio_costo), 0).toLocaleString("es-DO",{minimumFractionDigits:2})}`, label: "Valor inventario" },
           ].map((s,i) => (
             <div className="mini-stat" key={i}>
@@ -244,26 +304,31 @@ export default function ProductosPage() {
         </div>
 
         <div className="toolbar">
-          <input className="search-input" placeholder="🔍 Buscar por nombre o código..."
-            value={busqueda} onChange={e => setBusqueda(e.target.value)} />
+          <input
+            className="search-input"
+            placeholder="Buscar por nombre o codigo..."
+            value={busqueda}
+            onChange={e => setBusqueda(e.target.value.substring(0, 100))}
+            maxLength={100}
+          />
           <button className="btn-primary" onClick={() => { resetForm(); setEditando(null); setShowModal(true); }}>
             + Nuevo
           </button>
         </div>
 
         {loading ? (
-          <div className="loading">⏳ Cargando productos...</div>
+          <div className="loading">Cargando productos...</div>
         ) : productosFiltrados.length === 0 ? (
           <div className="empty-state">
-            <div className="empty-icon">📦</div>
-            <p>No hay productos aún. ¡Crea el primero!</p>
+            <div className="empty-icon">INV</div>
+            <p>No hay productos aun. Crea el primero!</p>
           </div>
         ) : (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Código</th><th>Nombre</th><th>Categoría</th>
+                  <th>Codigo</th><th>Nombre</th><th>Categoria</th>
                   <th>Costo</th><th>Precio</th><th>Margen</th>
                   <th>Stock</th><th>Estado</th><th>Acciones</th>
                 </tr>
@@ -288,8 +353,8 @@ export default function ProductosPage() {
                     </td>
                     <td><span className={`badge ${p.activo?"badge-green":"badge-red"}`}>{p.activo?"Activo":"Inactivo"}</span></td>
                     <td>
-                      <button className="action-btn" onClick={() => abrirEditar(p)}>✏️ Editar</button>
-                      <button className="action-btn del" onClick={() => eliminarProducto(p.id)}>🗑️</button>
+                      <button className="action-btn" onClick={() => abrirEditar(p)}>Editar</button>
+                      <button className="action-btn del" onClick={() => eliminarProducto(p.id)}>Eliminar</button>
                     </td>
                   </tr>
                 ))}
@@ -302,38 +367,49 @@ export default function ProductosPage() {
       {showModal && (
         <div className="modal-overlay" onClick={e => e.target===e.currentTarget && setShowModal(false)}>
           <div className="modal">
-            <h2 className="modal-title">{editando ? "✏️ Editar Producto" : "➕ Nuevo Producto"}</h2>
+            <h2 className="modal-title">{editando ? "Editar Producto" : "Nuevo Producto"}</h2>
             <div className="form-grid">
+              {formError && <div className="form-error">{formError}</div>}
               <div className="form-group full">
-                <label className="form-label">Nombre del producto</label>
-                <input className="form-input" placeholder="Ej: Cerveza Presidente" value={form.nombre} onChange={e => setForm({...form,nombre:e.target.value})} />
+                <label className="form-label">Nombre del producto *</label>
+                <input className="form-input" placeholder="Ej: Cerveza Presidente" value={form.nombre}
+                  onChange={e => setForm({...form,nombre:e.target.value})} maxLength={200} />
               </div>
               <div className="form-group">
-                <label className="form-label">Código de barras</label>
-                <input className="form-input" placeholder="Dejar vacío = auto" value={form.codigo_barras} onChange={e => setForm({...form,codigo_barras:e.target.value})} />
+                <label className="form-label">Codigo de barras</label>
+                <input className="form-input" placeholder="Dejar vacio = auto" value={form.codigo_barras}
+                  onChange={e => setForm({...form,codigo_barras:e.target.value})} maxLength={50} />
               </div>
               <div className="form-group">
-                <label className="form-label">Categoría</label>
+                <label className="form-label">Categoria</label>
                 <select className="form-input" value={form.categoria} onChange={e => setForm({...form,categoria:e.target.value})}>
-                  <option value="">Sin categoría</option>
+                  <option value="">Sin categoria</option>
                   {categorias.map(c => <option key={c.id} value={c.id}>{c.nombre}</option>)}
                 </select>
               </div>
               <div className="form-group">
-                <label className="form-label">Precio de costo (RD$)</label>
-                <input className="form-input" type="number" placeholder="0.00" value={form.precio_costo} onChange={e => setForm({...form,precio_costo:e.target.value})} />
+                <label className="form-label">Precio de costo (RD$) *</label>
+                <input className="form-input" type="number" step="0.01" min="0" max="99999999"
+                  placeholder="0.00" value={form.precio_costo}
+                  onChange={e => setForm({...form,precio_costo:e.target.value})} />
               </div>
               <div className="form-group">
-                <label className="form-label">Precio de venta (RD$)</label>
-                <input className="form-input" type="number" placeholder="0.00" value={form.precio_venta} onChange={e => setForm({...form,precio_venta:e.target.value})} />
+                <label className="form-label">Precio de venta (RD$) *</label>
+                <input className="form-input" type="number" step="0.01" min="0.01" max="99999999"
+                  placeholder="0.00" value={form.precio_venta}
+                  onChange={e => setForm({...form,precio_venta:e.target.value})} />
               </div>
               <div className="form-group">
-                <label className="form-label">Stock actual</label>
-                <input className="form-input" type="number" placeholder="0" value={form.stock_actual} onChange={e => setForm({...form,stock_actual:e.target.value})} />
+                <label className="form-label">Stock actual *</label>
+                <input className="form-input" type="number" step="1" min="0"
+                  placeholder="0" value={form.stock_actual}
+                  onChange={e => setForm({...form,stock_actual:e.target.value})} />
               </div>
               <div className="form-group">
-                <label className="form-label">Stock mínimo</label>
-                <input className="form-input" type="number" placeholder="5" value={form.stock_minimo} onChange={e => setForm({...form,stock_minimo:e.target.value})} />
+                <label className="form-label">Stock minimo</label>
+                <input className="form-input" type="number" step="1" min="0"
+                  placeholder="5" value={form.stock_minimo}
+                  onChange={e => setForm({...form,stock_minimo:e.target.value})} />
               </div>
               <div className="form-group">
                 <label className="form-label">Unidad de medida</label>
@@ -345,8 +421,8 @@ export default function ProductosPage() {
             </div>
             <div className="modal-actions">
               <button className="btn-cancel" onClick={() => setShowModal(false)}>Cancelar</button>
-              <button className="btn-primary" onClick={guardarProducto}>
-                {editando ? "💾 Guardar cambios" : "✅ Crear producto"}
+              <button className="btn-primary" onClick={guardarProducto} disabled={saving}>
+                {saving ? "Guardando..." : editando ? "Guardar cambios" : "Crear producto"}
               </button>
             </div>
           </div>
