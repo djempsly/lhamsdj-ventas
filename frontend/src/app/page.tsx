@@ -290,7 +290,7 @@ export default function LoginPage() {
         {/* LEFT */}
         <div className="left-panel">
           <div className="logo-area">
-            <Image src="/logo.png" alt="L'hams DJ Logo" width={80} height={80} className="logo-img" />
+            <Image src="/logo.png" alt="L'hams DJ Logo" width={80} height={80} className="logo-img" priority />
             <div className="logo-text">
               <div className="logo-name">Lhams-<span>DJ</span></div>
               <div className="logo-tagline">Sistema de Ventas</div>
@@ -327,7 +327,7 @@ export default function LoginPage() {
         {/* RIGHT */}
         <div className="right-panel">
           <div className="form-card">
-            <Image src="/logo.png" alt="Logo" width={60} height={60} className="card-logo" />
+            <Image src="/logo.png" alt="Logo" width={60} height={60} className="card-logo" priority />
             <h2 className="form-title">Iniciar Sesion</h2>
             <p className="form-subtitle">Accede a tu panel de control</p>
 

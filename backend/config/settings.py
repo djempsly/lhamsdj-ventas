@@ -143,7 +143,7 @@ SIMPLE_JWT = {
 
 # --- COOKIES -------------------------------------------------------------
 
-COOKIE_DOMAIN = os.getenv('COOKIE_DOMAIN', 'localhost')
+COOKIE_DOMAIN = os.getenv('COOKIE_DOMAIN', '') or None  # None = browser uses response origin
 COOKIE_SECURE = os.getenv('COOKIE_SECURE', 'False').lower() in ('true', '1')
 
 # --- CORS ----------------------------------------------------------------

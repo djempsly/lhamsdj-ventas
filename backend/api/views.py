@@ -54,35 +54,43 @@ def _get_client_ip(request):
     return request.META.get('REMOTE_ADDR')
 
 
+def _cookie_kwargs():
+    """Common cookie parameters."""
+    kwargs = {
+        'httponly': True,
+        'secure': settings.COOKIE_SECURE,
+        'samesite': 'Lax',
+    }
+    if settings.COOKIE_DOMAIN:
+        kwargs['domain'] = settings.COOKIE_DOMAIN
+    return kwargs
+
+
 def _set_auth_cookies(response, access_token, refresh_token):
     """Set httpOnly cookies for JWT tokens."""
+    base = _cookie_kwargs()
     response.set_cookie(
         'access_token',
         str(access_token),
-        httponly=True,
-        secure=settings.COOKIE_SECURE,
-        samesite='Lax',
         max_age=int(settings.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'].total_seconds()),
-        domain=settings.COOKIE_DOMAIN,
         path='/',
+        **base,
     )
     response.set_cookie(
         'refresh_token',
         str(refresh_token),
-        httponly=True,
-        secure=settings.COOKIE_SECURE,
-        samesite='Lax',
         max_age=int(settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
-        domain=settings.COOKIE_DOMAIN,
         path='/api/auth/',
+        **base,
     )
     return response
 
 
 def _clear_auth_cookies(response):
     """Remove auth cookies."""
-    response.delete_cookie('access_token', path='/', domain=settings.COOKIE_DOMAIN)
-    response.delete_cookie('refresh_token', path='/api/auth/', domain=settings.COOKIE_DOMAIN)
+    domain = settings.COOKIE_DOMAIN
+    response.delete_cookie('access_token', path='/', domain=domain)
+    response.delete_cookie('refresh_token', path='/api/auth/', domain=domain)
     return response
 
 
@@ -227,15 +235,13 @@ class CookieTokenRefreshView(APIView):
             new_access = str(token.access_token)
 
             response = Response({'detail': 'Token refreshed'})
+            base = _cookie_kwargs()
             response.set_cookie(
                 'access_token',
                 new_access,
-                httponly=True,
-                secure=settings.COOKIE_SECURE,
-                samesite='Lax',
                 max_age=int(settings.SIMPLE_JWT['ACCESS_TOKEN_LIFETIME'].total_seconds()),
-                domain=settings.COOKIE_DOMAIN,
                 path='/',
+                **base,
             )
 
             # Rotate refresh token
@@ -244,12 +250,9 @@ class CookieTokenRefreshView(APIView):
                 response.set_cookie(
                     'refresh_token',
                     new_refresh,
-                    httponly=True,
-                    secure=settings.COOKIE_SECURE,
-                    samesite='Lax',
                     max_age=int(settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
-                    domain=settings.COOKIE_DOMAIN,
                     path='/api/auth/',
+                    **base,
                 )
                 if settings.SIMPLE_JWT.get('BLACKLIST_AFTER_ROTATION'):
                     try:
