@@ -1044,3 +1044,586 @@ class Conciliacion(models.Model):
 
     def __str__(self):
         return f"Conciliación {self.cuenta_bancaria} ({self.fecha_desde} - {self.fecha_hasta})"
+
+
+# =============================================================================
+# COTIZACIONES Y ÓRDENES DE COMPRA (Fase 3A)
+# =============================================================================
+
+class Cotizacion(models.Model):
+    """Cotizaciones / Presupuestos"""
+    ESTADO = [
+        ('BORRADOR', 'Borrador'),
+        ('ENVIADA', 'Enviada'),
+        ('ACEPTADA', 'Aceptada'),
+        ('RECHAZADA', 'Rechazada'),
+        ('FACTURADA', 'Facturada'),
+        ('VENCIDA', 'Vencida'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.PROTECT, null=True, blank=True)
+
+    numero = models.CharField(max_length=20)
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT)
+    vendedor = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True)
+
+    fecha = models.DateTimeField(auto_now_add=True)
+    fecha_validez = models.DateField(help_text="Válida hasta esta fecha")
+
+    moneda = models.ForeignKey(Moneda, on_delete=models.PROTECT, null=True)
+    tasa_cambio = models.DecimalField(max_digits=12, decimal_places=4, default=1)
+
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    descuento = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_impuestos = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    condiciones = models.TextField(blank=True, help_text="Términos y condiciones")
+    notas = models.TextField(blank=True)
+
+    estado = models.CharField(max_length=12, choices=ESTADO, default='BORRADOR')
+
+    # Referencia a la venta generada (cuando se factura)
+    venta = models.ForeignKey(Venta, on_delete=models.SET_NULL, null=True, blank=True, related_name='cotizacion_origen')
+
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha']
+        indexes = [
+            models.Index(fields=['negocio', 'estado']),
+            models.Index(fields=['negocio', 'cliente']),
+        ]
+
+    def __str__(self):
+        return f"COT-{self.numero}"
+
+
+class DetalleCotizacion(models.Model):
+    """Detalle de productos en cotización"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.CASCADE, related_name='detalles')
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT)
+
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
+    precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
+    descuento = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2)
+    impuesto = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=12, decimal_places=2)
+
+
+class OrdenCompra(models.Model):
+    """Órdenes de compra con flujo de aprobación"""
+    ESTADO = [
+        ('BORRADOR', 'Borrador'),
+        ('PENDIENTE_APROBACION', 'Pendiente de Aprobación'),
+        ('APROBADA', 'Aprobada'),
+        ('RECHAZADA', 'Rechazada'),
+        ('ENVIADA', 'Enviada al Proveedor'),
+        ('RECIBIDA_PARCIAL', 'Recibida Parcialmente'),
+        ('RECIBIDA', 'Recibida'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.PROTECT)
+    almacen = models.ForeignKey(Almacen, on_delete=models.PROTECT, null=True, blank=True)
+
+    numero = models.CharField(max_length=20)
+    fecha = models.DateTimeField(auto_now_add=True)
+    fecha_entrega_esperada = models.DateField(null=True, blank=True)
+
+    moneda = models.ForeignKey(Moneda, on_delete=models.PROTECT, null=True)
+    tasa_cambio = models.DecimalField(max_digits=12, decimal_places=4, default=1)
+
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_impuestos = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    estado = models.CharField(max_length=25, choices=ESTADO, default='BORRADOR')
+    solicitado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, related_name='ordenes_solicitadas')
+    aprobado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True, related_name='ordenes_aprobadas')
+    fecha_aprobacion = models.DateTimeField(null=True, blank=True)
+
+    # Referencia a la compra generada
+    compra = models.ForeignKey(Compra, on_delete=models.SET_NULL, null=True, blank=True, related_name='orden_origen')
+
+    condiciones = models.TextField(blank=True)
+    notas = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha']
+        indexes = [
+            models.Index(fields=['negocio', 'estado']),
+        ]
+
+    def __str__(self):
+        return f"OC-{self.numero}"
+
+
+class DetalleOrdenCompra(models.Model):
+    """Detalle de productos en orden de compra"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    orden = models.ForeignKey(OrdenCompra, on_delete=models.CASCADE, related_name='detalles')
+    producto = models.ForeignKey(Producto, on_delete=models.PROTECT)
+
+    cantidad = models.DecimalField(max_digits=12, decimal_places=2)
+    cantidad_recibida = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    precio_unitario = models.DecimalField(max_digits=12, decimal_places=2)
+    subtotal = models.DecimalField(max_digits=12, decimal_places=2)
+    impuesto = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total = models.DecimalField(max_digits=12, decimal_places=2)
+
+
+# =============================================================================
+# CUENTAS POR COBRAR / PAGAR (Fase 3B)
+# =============================================================================
+
+class CuentaPorCobrar(models.Model):
+    """Cuentas por cobrar a clientes"""
+    ESTADO = [
+        ('PENDIENTE', 'Pendiente'),
+        ('PARCIAL', 'Pago Parcial'),
+        ('PAGADA', 'Pagada'),
+        ('VENCIDA', 'Vencida'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT)
+    venta = models.ForeignKey(Venta, on_delete=models.SET_NULL, null=True, blank=True)
+
+    numero = models.CharField(max_length=20)
+    fecha_emision = models.DateField()
+    fecha_vencimiento = models.DateField()
+
+    monto_original = models.DecimalField(max_digits=12, decimal_places=2)
+    monto_pagado = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    saldo_pendiente = models.DecimalField(max_digits=12, decimal_places=2)
+
+    estado = models.CharField(max_length=12, choices=ESTADO, default='PENDIENTE')
+    notas = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha_emision']
+        indexes = [
+            models.Index(fields=['negocio', 'estado']),
+            models.Index(fields=['negocio', 'cliente']),
+            models.Index(fields=['negocio', 'fecha_vencimiento']),
+        ]
+
+    def __str__(self):
+        return f"CxC-{self.numero} ({self.cliente.nombre})"
+
+    @property
+    def dias_vencida(self):
+        if self.estado in ('PAGADA', 'CANCELADA'):
+            return 0
+        dias = (timezone.now().date() - self.fecha_vencimiento).days
+        return max(0, dias)
+
+
+class CuentaPorPagar(models.Model):
+    """Cuentas por pagar a proveedores"""
+    ESTADO = [
+        ('PENDIENTE', 'Pendiente'),
+        ('PARCIAL', 'Pago Parcial'),
+        ('PAGADA', 'Pagada'),
+        ('VENCIDA', 'Vencida'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    proveedor = models.ForeignKey(Proveedor, on_delete=models.PROTECT)
+    compra = models.ForeignKey(Compra, on_delete=models.SET_NULL, null=True, blank=True)
+
+    numero = models.CharField(max_length=20)
+    fecha_emision = models.DateField()
+    fecha_vencimiento = models.DateField()
+
+    monto_original = models.DecimalField(max_digits=12, decimal_places=2)
+    monto_pagado = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    saldo_pendiente = models.DecimalField(max_digits=12, decimal_places=2)
+
+    estado = models.CharField(max_length=12, choices=ESTADO, default='PENDIENTE')
+    notas = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha_emision']
+        indexes = [
+            models.Index(fields=['negocio', 'estado']),
+            models.Index(fields=['negocio', 'proveedor']),
+            models.Index(fields=['negocio', 'fecha_vencimiento']),
+        ]
+
+    def __str__(self):
+        return f"CxP-{self.numero} ({self.proveedor.nombre})"
+
+    @property
+    def dias_vencida(self):
+        if self.estado in ('PAGADA', 'CANCELADA'):
+            return 0
+        dias = (timezone.now().date() - self.fecha_vencimiento).days
+        return max(0, dias)
+
+
+class Pago(models.Model):
+    """Pagos aplicados a CxC o CxP"""
+    TIPO = [
+        ('COBRO', 'Cobro a Cliente'),
+        ('PAGO', 'Pago a Proveedor'),
+    ]
+    METODO = [
+        ('EFECTIVO', 'Efectivo'),
+        ('CHEQUE', 'Cheque'),
+        ('TRANSFERENCIA', 'Transferencia'),
+        ('TARJETA', 'Tarjeta'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+
+    tipo = models.CharField(max_length=6, choices=TIPO)
+    metodo_pago = models.CharField(max_length=15, choices=METODO)
+    fecha = models.DateField()
+    monto = models.DecimalField(max_digits=12, decimal_places=2)
+    referencia = models.CharField(max_length=50, blank=True, help_text="Nro. cheque, transferencia, etc.")
+
+    # Vinculaciones (una de las dos)
+    cuenta_por_cobrar = models.ForeignKey(CuentaPorCobrar, on_delete=models.SET_NULL, null=True, blank=True, related_name='pagos')
+    cuenta_por_pagar = models.ForeignKey(CuentaPorPagar, on_delete=models.SET_NULL, null=True, blank=True, related_name='pagos')
+
+    cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.SET_NULL, null=True, blank=True)
+    asiento = models.ForeignKey(AsientoContable, on_delete=models.SET_NULL, null=True, blank=True)
+
+    notas = models.TextField(blank=True)
+    creado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha']
+
+    def __str__(self):
+        return f"Pago {self.tipo} - {self.monto}"
+
+
+# =============================================================================
+# RECURSOS HUMANOS / NÓMINA (Fase 5A)
+# =============================================================================
+
+class Departamento(models.Model):
+    """Departamentos de la empresa"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    nombre = models.CharField(max_length=100)
+    codigo = models.CharField(max_length=10)
+    responsable = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True)
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ['negocio', 'codigo']
+
+    def __str__(self):
+        return self.nombre
+
+
+class Empleado(models.Model):
+    """Empleados del negocio"""
+    TIPO_CONTRATO = [
+        ('INDEFINIDO', 'Indefinido'),
+        ('TEMPORAL', 'Temporal'),
+        ('PRUEBA', 'Período de Prueba'),
+        ('PASANTIA', 'Pasantía'),
+    ]
+    ESTADO = [
+        ('ACTIVO', 'Activo'),
+        ('VACACIONES', 'En Vacaciones'),
+        ('LICENCIA', 'En Licencia'),
+        ('SUSPENDIDO', 'Suspendido'),
+        ('DESVINCULADO', 'Desvinculado'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    usuario = models.OneToOneField(Usuario, on_delete=models.SET_NULL, null=True, blank=True, related_name='empleado')
+    departamento = models.ForeignKey(Departamento, on_delete=models.SET_NULL, null=True, blank=True)
+    sucursal = models.ForeignKey(Sucursal, on_delete=models.SET_NULL, null=True, blank=True)
+
+    # Datos personales
+    codigo = models.CharField(max_length=20)
+    nombre = models.CharField(max_length=200)
+    cedula = models.CharField(max_length=15)
+    fecha_nacimiento = models.DateField(null=True, blank=True)
+    genero = models.CharField(max_length=1, choices=[('M', 'Masculino'), ('F', 'Femenino')], blank=True)
+    telefono = models.CharField(max_length=20, blank=True)
+    email = models.EmailField(blank=True)
+    direccion = models.TextField(blank=True)
+
+    # Datos laborales
+    cargo = models.CharField(max_length=100)
+    tipo_contrato = models.CharField(max_length=12, choices=TIPO_CONTRATO, default='INDEFINIDO')
+    fecha_ingreso = models.DateField()
+    fecha_salida = models.DateField(null=True, blank=True)
+
+    # Salario
+    salario_bruto = models.DecimalField(max_digits=12, decimal_places=2)
+    moneda = models.ForeignKey(Moneda, on_delete=models.PROTECT, null=True)
+
+    # TSS (Tesorería de la Seguridad Social - RD)
+    nss = models.CharField(max_length=20, blank=True, help_text="Número de Seguridad Social")
+
+    estado = models.CharField(max_length=15, choices=ESTADO, default='ACTIVO')
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['negocio', 'codigo']
+        indexes = [
+            models.Index(fields=['negocio', 'estado']),
+        ]
+
+    def __str__(self):
+        return f"{self.codigo} - {self.nombre}"
+
+
+class Nomina(models.Model):
+    """Nómina de pagos"""
+    TIPO = [
+        ('QUINCENAL', 'Quincenal'),
+        ('MENSUAL', 'Mensual'),
+        ('SEMANAL', 'Semanal'),
+        ('ESPECIAL', 'Especial'),
+    ]
+    ESTADO = [
+        ('BORRADOR', 'Borrador'),
+        ('CALCULADA', 'Calculada'),
+        ('APROBADA', 'Aprobada'),
+        ('PAGADA', 'Pagada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+
+    nombre = models.CharField(max_length=100)
+    tipo = models.CharField(max_length=12, choices=TIPO, default='MENSUAL')
+    periodo_desde = models.DateField()
+    periodo_hasta = models.DateField()
+
+    total_bruto = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    total_deducciones = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    total_aportes_patronales = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+    total_neto = models.DecimalField(max_digits=15, decimal_places=2, default=0)
+
+    estado = models.CharField(max_length=12, choices=ESTADO, default='BORRADOR')
+    aprobado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True)
+    asiento = models.ForeignKey(AsientoContable, on_delete=models.SET_NULL, null=True, blank=True)
+
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-periodo_desde']
+
+    def __str__(self):
+        return f"{self.nombre} ({self.periodo_desde} - {self.periodo_hasta})"
+
+
+class DetalleNomina(models.Model):
+    """Detalle de nómina por empleado"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    nomina = models.ForeignKey(Nomina, on_delete=models.CASCADE, related_name='detalles')
+    empleado = models.ForeignKey(Empleado, on_delete=models.PROTECT)
+
+    salario_bruto = models.DecimalField(max_digits=12, decimal_places=2)
+    horas_extra = models.DecimalField(max_digits=8, decimal_places=2, default=0)
+    monto_horas_extra = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    comisiones = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    bonificaciones = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    otros_ingresos = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_ingresos = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    # Deducciones empleado (TSS RD)
+    sfs_empleado = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="Seguro Familiar de Salud 3.04%")
+    afp_empleado = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="Fondo de Pensiones 2.87%")
+    isr = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="Impuesto Sobre la Renta")
+    otras_deducciones = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_deducciones = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    # Aportes patronales
+    sfs_patronal = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="SFS Patronal 7.09%")
+    afp_patronal = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="AFP Patronal 7.10%")
+    srl = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="Seguro de Riesgos Laborales 1.10%")
+    infotep = models.DecimalField(max_digits=12, decimal_places=2, default=0, help_text="INFOTEP 1.00%")
+    total_aportes_patronales = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    salario_neto = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+
+class Vacacion(models.Model):
+    """Control de vacaciones"""
+    ESTADO = [
+        ('SOLICITADA', 'Solicitada'),
+        ('APROBADA', 'Aprobada'),
+        ('RECHAZADA', 'Rechazada'),
+        ('EN_CURSO', 'En Curso'),
+        ('COMPLETADA', 'Completada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    empleado = models.ForeignKey(Empleado, on_delete=models.CASCADE, related_name='vacaciones')
+
+    fecha_desde = models.DateField()
+    fecha_hasta = models.DateField()
+    dias = models.IntegerField()
+
+    estado = models.CharField(max_length=12, choices=ESTADO, default='SOLICITADA')
+    aprobado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True)
+    notas = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha_desde']
+
+
+# =============================================================================
+# CRM (Fase 5B)
+# =============================================================================
+
+class EtapaCRM(models.Model):
+    """Etapas del pipeline de ventas"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+
+    nombre = models.CharField(max_length=50)
+    orden = models.IntegerField(default=0)
+    probabilidad = models.IntegerField(default=0, help_text="Probabilidad de cierre 0-100")
+    color = models.CharField(max_length=7, default='#0ea5e9')
+    activa = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['orden']
+        unique_together = ['negocio', 'nombre']
+
+    def __str__(self):
+        return self.nombre
+
+
+class Oportunidad(models.Model):
+    """Oportunidades de venta (CRM)"""
+    PRIORIDAD = [
+        ('BAJA', 'Baja'),
+        ('MEDIA', 'Media'),
+        ('ALTA', 'Alta'),
+        ('URGENTE', 'Urgente'),
+    ]
+    ESTADO = [
+        ('ABIERTA', 'Abierta'),
+        ('GANADA', 'Ganada'),
+        ('PERDIDA', 'Perdida'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+
+    titulo = models.CharField(max_length=200)
+    cliente = models.ForeignKey(Cliente, on_delete=models.PROTECT)
+    etapa = models.ForeignKey(EtapaCRM, on_delete=models.PROTECT)
+
+    valor_estimado = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    moneda = models.ForeignKey(Moneda, on_delete=models.PROTECT, null=True)
+
+    fecha_cierre_esperada = models.DateField(null=True, blank=True)
+    prioridad = models.CharField(max_length=7, choices=PRIORIDAD, default='MEDIA')
+    estado = models.CharField(max_length=7, choices=ESTADO, default='ABIERTA')
+
+    asignado_a = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, related_name='oportunidades')
+    descripcion = models.TextField(blank=True)
+
+    # Referencias a documentos
+    cotizacion = models.ForeignKey(Cotizacion, on_delete=models.SET_NULL, null=True, blank=True)
+    venta = models.ForeignKey(Venta, on_delete=models.SET_NULL, null=True, blank=True)
+
+    razon_perdida = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+        indexes = [
+            models.Index(fields=['negocio', 'estado']),
+            models.Index(fields=['negocio', 'etapa']),
+        ]
+
+    def __str__(self):
+        return self.titulo
+
+
+class ActividadCRM(models.Model):
+    """Actividades y seguimiento de oportunidades"""
+    TIPO = [
+        ('LLAMADA', 'Llamada'),
+        ('EMAIL', 'Email'),
+        ('REUNION', 'Reunión'),
+        ('NOTA', 'Nota'),
+        ('TAREA', 'Tarea'),
+        ('SEGUIMIENTO', 'Seguimiento'),
+    ]
+    ESTADO = [
+        ('PENDIENTE', 'Pendiente'),
+        ('COMPLETADA', 'Completada'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    oportunidad = models.ForeignKey(Oportunidad, on_delete=models.CASCADE, related_name='actividades')
+
+    tipo = models.CharField(max_length=12, choices=TIPO)
+    titulo = models.CharField(max_length=200)
+    descripcion = models.TextField(blank=True)
+
+    fecha_programada = models.DateTimeField(null=True, blank=True)
+    fecha_completada = models.DateTimeField(null=True, blank=True)
+
+    asignado_a = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True)
+    estado = models.CharField(max_length=12, choices=ESTADO, default='PENDIENTE')
+
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha_programada']
+
+    def __str__(self):
+        return f"{self.tipo}: {self.titulo}"
+
+
+# =============================================================================
+# MULTI-MONEDA AVANZADA (Fase 4A)
+# =============================================================================
+
+class TasaCambio(models.Model):
+    """Historial de tasas de cambio"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    moneda_origen = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name='tasas_origen')
+    moneda_destino = models.ForeignKey(Moneda, on_delete=models.CASCADE, related_name='tasas_destino')
+    tasa = models.DecimalField(max_digits=12, decimal_places=6)
+    fecha = models.DateField()
+    fuente = models.CharField(max_length=50, blank=True, help_text="BCRD, manual, API")
+
+    class Meta:
+        ordering = ['-fecha']
+        unique_together = ['moneda_origen', 'moneda_destino', 'fecha']
+        indexes = [
+            models.Index(fields=['moneda_origen', 'moneda_destino', 'fecha']),
+        ]
+
+    def __str__(self):
+        return f"{self.moneda_origen}/{self.moneda_destino}: {self.tasa} ({self.fecha})"

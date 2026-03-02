@@ -17,7 +17,7 @@ const MESES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto"
 export default function ReportesPage() {
   const [mounted, setMounted] = useState(false);
   const [tema, setTema] = useState(TEMA_DEFAULT);
-  const [tipo, setTipo] = useState<"606" | "607">("607");
+  const [tipo, setTipo] = useState<"606" | "607" | "608">("607");
   const [year, setYear] = useState(new Date().getFullYear());
   const [month, setMonth] = useState(new Date().getMonth() + 1);
   const [preview, setPreview] = useState<ReporteRow[]>([]);
@@ -130,6 +130,7 @@ export default function ReportesPage() {
             <div className="tipo-tabs">
               <button className={`tipo-tab ${tipo==="607"?"active":""}`} onClick={() => setTipo("607")}>607 Ventas</button>
               <button className={`tipo-tab ${tipo==="606"?"active":""}`} onClick={() => setTipo("606")}>606 Compras</button>
+              <button className={`tipo-tab ${tipo==="608"?"active":""}`} onClick={() => setTipo("608")}>608 Anulaciones</button>
             </div>
           </div>
           <div className="control-group">
@@ -158,8 +159,38 @@ export default function ReportesPage() {
           <>
             <div className="stats-row">
               <div className="mini-stat"><div className="mini-stat-val">{preview.length}</div><div className="mini-stat-label">Total registros</div></div>
-              <div className="mini-stat"><div className="mini-stat-val">{formatCurrency(totalMonto)}</div><div className="mini-stat-label">Total monto</div></div>
+              <div className="mini-stat"><div className="mini-stat-val" style={{color:tema.accent}}>{formatCurrency(totalMonto)}</div><div className="mini-stat-label">Total monto</div></div>
               <div className="mini-stat"><div className="mini-stat-val">{formatCurrency(totalITBIS)}</div><div className="mini-stat-label">Total ITBIS</div></div>
+              <div className="mini-stat"><div className="mini-stat-val">{formatCurrency(totalMonto - totalITBIS)}</div><div className="mini-stat-label">Monto neto</div></div>
+            </div>
+
+            {/* Summary Chart */}
+            <div style={{ background:tema.card, border:`1px solid ${tema.borde}`, borderRadius:16, padding:24, marginBottom:24 }}>
+              <div style={{ fontSize:11, color:tema.subtexto, textTransform:"uppercase", fontWeight:600, letterSpacing:"0.08em", marginBottom:16 }}>Distribucion por Monto</div>
+              <svg width="100%" height="120" viewBox="0 0 600 120">
+                {(() => {
+                  const topRows = [...preview]
+                    .sort((a, b) => Number(b.monto_facturado || b.total || b.monto || 0) - Number(a.monto_facturado || a.total || a.monto || 0))
+                    .slice(0, 10);
+                  const maxVal = Math.max(...topRows.map(r => Number(r.monto_facturado || r.total || r.monto || 0)), 1);
+                  return topRows.map((r, i) => {
+                    const val = Number(r.monto_facturado || r.total || r.monto || 0);
+                    const w = (val / maxVal) * 460;
+                    const y = i * 12;
+                    return (
+                      <g key={i}>
+                        <rect x={130} y={y} width={w} height={9} rx={3} fill={tema.accent} opacity={1 - i * 0.07} />
+                        <text x={0} y={y + 8} fontSize={9} fill={tema.subtexto} fontFamily="'DM Sans',sans-serif">
+                          {String(r.rnc || r.numero || r.ncf || `#${i + 1}`).slice(0, 18)}
+                        </text>
+                        <text x={595} y={y + 8} fontSize={9} fill={tema.texto} fontFamily="'DM Sans',sans-serif" textAnchor="end">
+                          {formatCurrency(val)}
+                        </text>
+                      </g>
+                    );
+                  });
+                })()}
+              </svg>
             </div>
 
             <div className="table-wrap">

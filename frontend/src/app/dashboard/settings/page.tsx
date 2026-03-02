@@ -66,7 +66,7 @@ const TEMA_DEFAULT = {
 
 const ROLES = ["SUPER_ADMIN","ADMIN_NEGOCIO","GERENTE","CONTADOR","CAJERO","VENDEDOR","ALMACEN"];
 
-type Tab = "negocio" | "sucursales" | "usuarios" | "categorias";
+type Tab = "negocio" | "sucursales" | "usuarios" | "categorias" | "preferencias";
 
 export default function SettingsPage() {
   const [mounted, setMounted] = useState(false);
@@ -297,7 +297,7 @@ export default function SettingsPage() {
         {formError && tab === "negocio" && <div className="form-error">{formError}</div>}
 
         <div className="tabs">
-          {([["negocio","Negocio"],["sucursales","Sucursales"],["usuarios","Usuarios"],["categorias","Categorias"]] as const).map(([key, label]) => (
+          {([["negocio","Negocio"],["sucursales","Sucursales"],["usuarios","Usuarios"],["categorias","Categorias"],["preferencias","Preferencias"]] as const).map(([key, label]) => (
             <button key={key} className={`tab ${tab===key?"active":""}`} onClick={() => { setTab(key); setFormError(""); }}>{label}</button>
           ))}
         </div>
@@ -415,6 +415,41 @@ export default function SettingsPage() {
               </table>
             </div>
           </>
+        )}
+
+        {/* --- TAB: PREFERENCIAS --- */}
+        {tab === "preferencias" && (
+          <div className="form-section">
+            <div style={{fontSize:11,color:tema.subtexto,textTransform:"uppercase",fontWeight:600,letterSpacing:"0.08em",marginBottom:16}}>Idioma / Language</div>
+            <div style={{display:"flex",gap:10,marginBottom:24}}>
+              {[{code:"es",label:"Espanol"},{code:"en",label:"English"}].map(lang => (
+                <button key={lang.code} className={`tab ${(typeof window !== "undefined" && localStorage.getItem("locale") || "es") === lang.code ? "active" : ""}`}
+                  onClick={() => {
+                    localStorage.setItem("locale", lang.code);
+                    window.dispatchEvent(new Event("locale-changed"));
+                    setSuccessMsg(`Idioma cambiado a ${lang.label}`);
+                    setTimeout(() => setSuccessMsg(""), 2000);
+                  }}>
+                  {lang.label}
+                </button>
+              ))}
+            </div>
+            <div style={{fontSize:11,color:tema.subtexto,textTransform:"uppercase",fontWeight:600,letterSpacing:"0.08em",marginBottom:16}}>Informacion de la App</div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(auto-fill,minmax(200px,1fr))",gap:12}}>
+              <div style={{background:tema.card,border:`1px solid ${tema.borde}`,borderRadius:12,padding:16}}>
+                <div style={{fontSize:12,color:tema.subtexto}}>Version</div>
+                <div style={{fontWeight:700,fontSize:16}}>2.0.0</div>
+              </div>
+              <div style={{background:tema.card,border:`1px solid ${tema.borde}`,borderRadius:12,padding:16}}>
+                <div style={{fontSize:12,color:tema.subtexto}}>Framework</div>
+                <div style={{fontWeight:700,fontSize:16}}>Next.js + Django</div>
+              </div>
+              <div style={{background:tema.card,border:`1px solid ${tema.borde}`,borderRadius:12,padding:16}}>
+                <div style={{fontSize:12,color:tema.subtexto}}>Tipo</div>
+                <div style={{fontWeight:700,fontSize:16}}>PWA</div>
+              </div>
+            </div>
+          </div>
         )}
       </div>
 

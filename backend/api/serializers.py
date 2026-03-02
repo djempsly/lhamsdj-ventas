@@ -6,6 +6,10 @@ from .models import (
     Cliente, Proveedor, SecuenciaNCF, Venta, DetalleVenta,
     Compra, DetalleCompra, CuentaBancaria, CuadreCaja, AnalisisAI,
     MovimientoBancario, Conciliacion,
+    Cotizacion, DetalleCotizacion, OrdenCompra, DetalleOrdenCompra,
+    CuentaPorCobrar, CuentaPorPagar, Pago,
+    Departamento, Empleado, Nomina, DetalleNomina, Vacacion,
+    EtapaCRM, Oportunidad, ActividadCRM, TasaCambio,
 )
 
 
@@ -296,3 +300,269 @@ class CuentaBancariaSerializer(serializers.ModelSerializer):
         model = CuentaBancaria
         fields = ['id', 'banco', 'tipo', 'numero', 'moneda', 'saldo',
                   'cuenta_contable', 'activa']
+
+
+# =============================================================================
+# COTIZACIONES (Fase 3A)
+# =============================================================================
+
+class DetalleCotizacionSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+
+    class Meta:
+        model = DetalleCotizacion
+        fields = ['id', 'producto', 'producto_nombre', 'cantidad', 'precio_unitario',
+                  'descuento', 'subtotal', 'impuesto', 'total']
+
+
+class DetalleCotizacionWriteSerializer(serializers.Serializer):
+    producto = serializers.UUIDField()
+    cantidad = serializers.DecimalField(max_digits=12, decimal_places=2)
+    precio_unitario = serializers.DecimalField(max_digits=12, decimal_places=2)
+    descuento = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+
+class CotizacionSerializer(serializers.ModelSerializer):
+    detalles = DetalleCotizacionSerializer(many=True, read_only=True)
+    detalles_input = DetalleCotizacionWriteSerializer(many=True, write_only=True, required=False)
+    cliente_nombre = serializers.CharField(source='cliente.nombre', read_only=True)
+    vendedor_nombre = serializers.CharField(source='vendedor.get_full_name', read_only=True)
+
+    class Meta:
+        model = Cotizacion
+        fields = ['id', 'numero', 'cliente', 'cliente_nombre', 'vendedor', 'vendedor_nombre',
+                  'fecha', 'fecha_validez', 'subtotal', 'descuento', 'total_impuestos', 'total',
+                  'condiciones', 'notas', 'estado', 'venta', 'detalles', 'detalles_input']
+        read_only_fields = ['numero', 'vendedor']
+
+    def create(self, validated_data):
+        detalles_data = validated_data.pop('detalles_input', [])
+        cotizacion = Cotizacion.objects.create(**validated_data)
+
+        subtotal_total = 0
+        impuestos_total = 0
+        descuento_total = 0
+        for item in detalles_data:
+            producto = Producto.objects.get(pk=item['producto'])
+            cantidad = item['cantidad']
+            precio = item['precio_unitario']
+            desc = item.get('descuento', 0)
+            subtotal = cantidad * precio - desc
+            impuesto = subtotal * (producto.tasa_impuesto / 100) if producto.aplica_impuesto else 0
+            total_linea = subtotal + impuesto
+
+            DetalleCotizacion.objects.create(
+                cotizacion=cotizacion, producto=producto, cantidad=cantidad,
+                precio_unitario=precio, descuento=desc, subtotal=subtotal,
+                impuesto=impuesto, total=total_linea,
+            )
+            subtotal_total += subtotal
+            impuestos_total += impuesto
+            descuento_total += desc
+
+        if detalles_data:
+            cotizacion.subtotal = subtotal_total + descuento_total
+            cotizacion.descuento = descuento_total
+            cotizacion.total_impuestos = impuestos_total
+            cotizacion.total = subtotal_total + impuestos_total
+            cotizacion.save(update_fields=['subtotal', 'descuento', 'total_impuestos', 'total'])
+
+        return cotizacion
+
+
+# =============================================================================
+# ÓRDENES DE COMPRA (Fase 3A)
+# =============================================================================
+
+class DetalleOrdenCompraSerializer(serializers.ModelSerializer):
+    producto_nombre = serializers.CharField(source='producto.nombre', read_only=True)
+
+    class Meta:
+        model = DetalleOrdenCompra
+        fields = ['id', 'producto', 'producto_nombre', 'cantidad', 'cantidad_recibida',
+                  'precio_unitario', 'subtotal', 'impuesto', 'total']
+
+
+class DetalleOrdenCompraWriteSerializer(serializers.Serializer):
+    producto = serializers.UUIDField()
+    cantidad = serializers.DecimalField(max_digits=12, decimal_places=2)
+    precio_unitario = serializers.DecimalField(max_digits=12, decimal_places=2)
+
+
+class OrdenCompraSerializer(serializers.ModelSerializer):
+    detalles = DetalleOrdenCompraSerializer(many=True, read_only=True)
+    detalles_input = DetalleOrdenCompraWriteSerializer(many=True, write_only=True, required=False)
+    proveedor_nombre = serializers.CharField(source='proveedor.nombre', read_only=True)
+
+    class Meta:
+        model = OrdenCompra
+        fields = ['id', 'numero', 'proveedor', 'proveedor_nombre', 'almacen',
+                  'fecha', 'fecha_entrega_esperada', 'subtotal', 'total_impuestos', 'total',
+                  'estado', 'solicitado_por', 'aprobado_por', 'fecha_aprobacion',
+                  'compra', 'condiciones', 'notas', 'detalles', 'detalles_input']
+        read_only_fields = ['numero', 'solicitado_por', 'aprobado_por', 'fecha_aprobacion']
+
+    def create(self, validated_data):
+        detalles_data = validated_data.pop('detalles_input', [])
+        orden = OrdenCompra.objects.create(**validated_data)
+
+        subtotal_total = 0
+        impuestos_total = 0
+        for item in detalles_data:
+            producto = Producto.objects.get(pk=item['producto'])
+            cantidad = item['cantidad']
+            precio = item['precio_unitario']
+            subtotal = cantidad * precio
+            impuesto = subtotal * (producto.tasa_impuesto / 100) if producto.aplica_impuesto else 0
+            total_linea = subtotal + impuesto
+
+            DetalleOrdenCompra.objects.create(
+                orden=orden, producto=producto, cantidad=cantidad,
+                precio_unitario=precio, subtotal=subtotal,
+                impuesto=impuesto, total=total_linea,
+            )
+            subtotal_total += subtotal
+            impuestos_total += impuesto
+
+        if detalles_data:
+            orden.subtotal = subtotal_total
+            orden.total_impuestos = impuestos_total
+            orden.total = subtotal_total + impuestos_total
+            orden.save(update_fields=['subtotal', 'total_impuestos', 'total'])
+
+        return orden
+
+
+# =============================================================================
+# CUENTAS POR COBRAR / PAGAR (Fase 3B)
+# =============================================================================
+
+class CuentaPorCobrarSerializer(serializers.ModelSerializer):
+    cliente_nombre = serializers.CharField(source='cliente.nombre', read_only=True)
+    dias_vencida = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = CuentaPorCobrar
+        fields = ['id', 'numero', 'cliente', 'cliente_nombre', 'venta',
+                  'fecha_emision', 'fecha_vencimiento', 'monto_original',
+                  'monto_pagado', 'saldo_pendiente', 'estado', 'dias_vencida', 'notas']
+        read_only_fields = ['numero']
+
+
+class CuentaPorPagarSerializer(serializers.ModelSerializer):
+    proveedor_nombre = serializers.CharField(source='proveedor.nombre', read_only=True)
+    dias_vencida = serializers.IntegerField(read_only=True)
+
+    class Meta:
+        model = CuentaPorPagar
+        fields = ['id', 'numero', 'proveedor', 'proveedor_nombre', 'compra',
+                  'fecha_emision', 'fecha_vencimiento', 'monto_original',
+                  'monto_pagado', 'saldo_pendiente', 'estado', 'dias_vencida', 'notas']
+        read_only_fields = ['numero']
+
+
+class PagoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Pago
+        fields = ['id', 'tipo', 'metodo_pago', 'fecha', 'monto', 'referencia',
+                  'cuenta_por_cobrar', 'cuenta_por_pagar', 'cuenta_bancaria', 'notas']
+        read_only_fields = ['creado_por']
+
+
+# =============================================================================
+# HR / NÓMINA (Fase 5A)
+# =============================================================================
+
+class DepartamentoSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Departamento
+        fields = ['id', 'nombre', 'codigo', 'responsable', 'activo']
+
+
+class EmpleadoSerializer(serializers.ModelSerializer):
+    departamento_nombre = serializers.CharField(source='departamento.nombre', read_only=True)
+
+    class Meta:
+        model = Empleado
+        fields = ['id', 'codigo', 'nombre', 'cedula', 'fecha_nacimiento', 'genero',
+                  'telefono', 'email', 'direccion', 'cargo', 'tipo_contrato',
+                  'fecha_ingreso', 'fecha_salida', 'salario_bruto', 'nss',
+                  'departamento', 'departamento_nombre', 'sucursal', 'estado']
+        read_only_fields = ['codigo']
+
+
+class DetalleNominaSerializer(serializers.ModelSerializer):
+    empleado_nombre = serializers.CharField(source='empleado.nombre', read_only=True)
+
+    class Meta:
+        model = DetalleNomina
+        fields = ['id', 'empleado', 'empleado_nombre', 'salario_bruto',
+                  'horas_extra', 'monto_horas_extra', 'comisiones', 'bonificaciones',
+                  'otros_ingresos', 'total_ingresos',
+                  'sfs_empleado', 'afp_empleado', 'isr', 'otras_deducciones', 'total_deducciones',
+                  'sfs_patronal', 'afp_patronal', 'srl', 'infotep', 'total_aportes_patronales',
+                  'salario_neto']
+
+
+class NominaSerializer(serializers.ModelSerializer):
+    detalles = DetalleNominaSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Nomina
+        fields = ['id', 'nombre', 'tipo', 'periodo_desde', 'periodo_hasta',
+                  'total_bruto', 'total_deducciones', 'total_aportes_patronales',
+                  'total_neto', 'estado', 'detalles']
+        read_only_fields = ['total_bruto', 'total_deducciones', 'total_aportes_patronales', 'total_neto']
+
+
+class VacacionSerializer(serializers.ModelSerializer):
+    empleado_nombre = serializers.CharField(source='empleado.nombre', read_only=True)
+
+    class Meta:
+        model = Vacacion
+        fields = ['id', 'empleado', 'empleado_nombre', 'fecha_desde', 'fecha_hasta',
+                  'dias', 'estado', 'notas']
+
+
+# =============================================================================
+# CRM (Fase 5B)
+# =============================================================================
+
+class EtapaCRMSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = EtapaCRM
+        fields = ['id', 'nombre', 'orden', 'probabilidad', 'color', 'activa']
+
+
+class ActividadCRMSerializer(serializers.ModelSerializer):
+    asignado_nombre = serializers.CharField(source='asignado_a.get_full_name', read_only=True)
+
+    class Meta:
+        model = ActividadCRM
+        fields = ['id', 'oportunidad', 'tipo', 'titulo', 'descripcion',
+                  'fecha_programada', 'fecha_completada', 'asignado_a', 'asignado_nombre', 'estado']
+
+
+class OportunidadSerializer(serializers.ModelSerializer):
+    cliente_nombre = serializers.CharField(source='cliente.nombre', read_only=True)
+    etapa_nombre = serializers.CharField(source='etapa.nombre', read_only=True)
+    asignado_nombre = serializers.CharField(source='asignado_a.get_full_name', read_only=True)
+    actividades = ActividadCRMSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = Oportunidad
+        fields = ['id', 'titulo', 'cliente', 'cliente_nombre', 'etapa', 'etapa_nombre',
+                  'valor_estimado', 'fecha_cierre_esperada', 'prioridad', 'estado',
+                  'asignado_a', 'asignado_nombre', 'descripcion',
+                  'cotizacion', 'venta', 'razon_perdida', 'actividades',
+                  'creado_en', 'actualizado_en']
+
+
+# =============================================================================
+# MULTI-MONEDA (Fase 4A)
+# =============================================================================
+
+class TasaCambioSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = TasaCambio
+        fields = ['id', 'moneda_origen', 'moneda_destino', 'tasa', 'fecha', 'fuente']

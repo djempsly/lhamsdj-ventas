@@ -32,6 +32,8 @@ INSTALLED_APPS = [
     'rest_framework_simplejwt',
     'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
+    'drf_spectacular',
+    'django_celery_beat',
     'api',
 ]
 
@@ -41,11 +43,14 @@ MIDDLEWARE = [
     'corsheaders.middleware.CorsMiddleware',
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    'django.middleware.locale.LocaleMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'api.middleware.NegocioFilterMiddleware',
+    'api.middleware.AuditMiddleware',
 ]
 
 ROOT_URLCONF = 'config.urls'
@@ -120,8 +125,30 @@ REST_FRAMEWORK = {
         'login': '10/minute',
     },
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
+    ],
+}
+
+# --- DRF SPECTACULAR (API DOCS) ------------------------------------------
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Sistema de Ventas API',
+    'DESCRIPTION': 'ERP completo con facturación electrónica DGII, contabilidad, inventario, AI y más.',
+    'VERSION': '2.0.0',
+    'SERVE_INCLUDE_SCHEMA': False,
+    'COMPONENT_SPLIT_REQUEST': True,
+    'TAGS': [
+        {'name': 'Auth', 'description': 'Autenticación y sesiones'},
+        {'name': 'Negocios', 'description': 'Gestión de empresas'},
+        {'name': 'Productos', 'description': 'Inventario y productos'},
+        {'name': 'Ventas', 'description': 'Punto de venta y facturación'},
+        {'name': 'Compras', 'description': 'Compras y proveedores'},
+        {'name': 'Contabilidad', 'description': 'Plan de cuentas y asientos'},
+        {'name': 'Fiscal', 'description': 'Reportes DGII 606/607/608'},
+        {'name': 'Bancos', 'description': 'Reconciliación bancaria'},
+        {'name': 'AI', 'description': 'Análisis inteligente'},
     ],
 }
 
@@ -187,10 +214,20 @@ if not DEBUG:
 
 # --- I18N ----------------------------------------------------------------
 
-LANGUAGE_CODE = 'es-do'
+LANGUAGE_CODE = 'es'
 TIME_ZONE = 'America/Santo_Domingo'
 USE_I18N = True
+USE_L10N = True
 USE_TZ = True
+
+LANGUAGES = [
+    ('es', 'Español'),
+    ('en', 'English'),
+]
+
+LOCALE_PATHS = [
+    BASE_DIR / 'locale',
+]
 
 # --- STATIC FILES --------------------------------------------------------
 
@@ -238,5 +275,56 @@ LOGGING = {
             'handlers': ['console', 'audit_file'],
             'level': 'INFO',
         },
+        'api': {
+            'handlers': ['console'],
+            'level': 'INFO',
+        },
     },
 }
+
+# --- CELERY --------------------------------------------------------------
+
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/1')
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/2')
+CELERY_ACCEPT_CONTENT = ['json']
+CELERY_TASK_SERIALIZER = 'json'
+CELERY_RESULT_SERIALIZER = 'json'
+CELERY_TIMEZONE = TIME_ZONE
+CELERY_TASK_TRACK_STARTED = True
+CELERY_TASK_TIME_LIMIT = 300
+CELERY_BEAT_SCHEDULE = {
+    'reintentar-ecf-contingencia': {
+        'task': 'api.tasks.reintentar_ecf_contingencia',
+        'schedule': 300.0,  # cada 5 minutos
+    },
+}
+
+# --- CACHE (Redis) -------------------------------------------------------
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
+        'TIMEOUT': 300,
+        'OPTIONS': {
+            'db': 0,
+        },
+    }
+}
+
+# --- SENTRY --------------------------------------------------------------
+
+SENTRY_DSN = os.getenv('SENTRY_DSN_BACKEND', '')
+if SENTRY_DSN:
+    import sentry_sdk
+    from sentry_sdk.integrations.django import DjangoIntegration
+    from sentry_sdk.integrations.celery import CeleryIntegration
+    from sentry_sdk.integrations.redis import RedisIntegration
+
+    sentry_sdk.init(
+        dsn=SENTRY_DSN,
+        integrations=[DjangoIntegration(), CeleryIntegration(), RedisIntegration()],
+        traces_sample_rate=0.1 if not DEBUG else 1.0,
+        send_default_pii=False,
+        environment='development' if DEBUG else 'production',
+    )

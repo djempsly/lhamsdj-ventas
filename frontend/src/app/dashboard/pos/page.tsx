@@ -48,10 +48,14 @@ export default function POSPage() {
   const [notas, setNotas] = useState("");
   const [procesando, setProcesando] = useState(false);
   const [error, setError] = useState("");
+  const [fullscreen, setFullscreen] = useState(false);
+  const barcodeBuffer = useRef("");
+  const barcodeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [exito, setExito] = useState(false);
   const [ventaCreada, setVentaCreada] = useState<{numero: string; total: number; cambio: number} | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cobrarRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -62,6 +66,42 @@ export default function POSPage() {
       setClientes(list.filter((c: Cliente) => c.tipo_cliente !== undefined));
     }).catch(() => {});
     inputRef.current?.focus();
+
+    // Barcode scanner: detect rapid keystrokes (scanners type fast)
+    const handleBarcode = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement || e.target instanceof HTMLTextAreaElement) return;
+      if (e.key === "Enter" && barcodeBuffer.current.length >= 4) {
+        const code = barcodeBuffer.current;
+        barcodeBuffer.current = "";
+        posService.buscarProducto(code).then(({ data }) => {
+          const prods = Array.isArray(data) ? data : [];
+          if (prods.length === 1) agregarAlCarrito(prods[0]);
+          else if (prods.length > 1) { setResultados(prods); setBusqueda(code); }
+        }).catch(() => {});
+        return;
+      }
+      if (e.key.length === 1) {
+        barcodeBuffer.current += e.key;
+        if (barcodeTimer.current) clearTimeout(barcodeTimer.current);
+        barcodeTimer.current = setTimeout(() => { barcodeBuffer.current = ""; }, 100);
+      }
+    };
+
+    // Keyboard shortcuts
+    const handleShortcuts = (e: KeyboardEvent) => {
+      if (e.key === "F2") { e.preventDefault(); inputRef.current?.focus(); }
+      if (e.key === "F4") { e.preventDefault(); cobrarRef.current?.(); }
+      if (e.key === "F8") { e.preventDefault(); setFullscreen(f => !f); }
+      if (e.key === "Escape") { setResultados([]); setBusqueda(""); }
+    };
+
+    window.addEventListener("keydown", handleBarcode);
+    window.addEventListener("keydown", handleShortcuts);
+    return () => {
+      window.removeEventListener("keydown", handleBarcode);
+      window.removeEventListener("keydown", handleShortcuts);
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const buscar = useCallback((q: string) => {
@@ -165,6 +205,43 @@ export default function POSPage() {
     } finally {
       setProcesando(false);
     }
+  };
+
+  cobrarRef.current = cobrar;
+
+  const imprimirRecibo = (venta: { numero: string; total: number; cambio: number }) => {
+    const win = window.open("", "_blank", "width=320,height=600");
+    if (!win) return;
+    const items = cart.length > 0 ? cart : [];
+    const fecha = new Date().toLocaleString("es-DO");
+    win.document.write(`<!DOCTYPE html><html><head><title>Recibo ${venta.numero}</title>
+      <style>
+        body { font-family:'Courier New',monospace; width:280px; margin:0 auto; padding:10px; font-size:12px; }
+        .center { text-align:center; }
+        .line { border-top:1px dashed #000; margin:8px 0; }
+        .row { display:flex; justify-content:space-between; }
+        .bold { font-weight:bold; }
+        .big { font-size:16px; font-weight:bold; }
+        h2 { margin:4px 0; font-size:14px; }
+        @media print { body { width:auto; } }
+      </style></head><body>
+      <div class="center"><h2>L'hams DJ - Sistema ERP</h2><p>${fecha}</p></div>
+      <div class="line"></div>
+      <div class="row bold"><span>Recibo #${venta.numero}</span></div>
+      <div class="line"></div>
+      ${items.map(c => `<div class="row"><span>${c.producto.nombre} x${c.cantidad}</span><span>$${(c.cantidad * c.producto.precio_venta).toFixed(2)}</span></div>`).join("")}
+      <div class="line"></div>
+      <div class="row"><span>Subtotal:</span><span>$${subtotal.toFixed(2)}</span></div>
+      ${descGlobal > 0 ? `<div class="row"><span>Descuento:</span><span>-$${descGlobal.toFixed(2)}</span></div>` : ""}
+      <div class="row"><span>ITBIS:</span><span>$${impuestos.toFixed(2)}</span></div>
+      <div class="line"></div>
+      <div class="row big"><span>TOTAL:</span><span>$${venta.total.toFixed(2)}</span></div>
+      ${tipoPago === "EFECTIVO" ? `<div class="row"><span>Pagado:</span><span>$${pagado.toFixed(2)}</span></div><div class="row bold"><span>Cambio:</span><span>$${venta.cambio.toFixed(2)}</span></div>` : `<div class="row"><span>Pago:</span><span>${tipoPago}</span></div>`}
+      <div class="line"></div>
+      <div class="center"><p>Gracias por su compra!</p><p style="font-size:10px">Powered by L'hams ERP</p></div>
+      </body></html>`);
+    win.document.close();
+    setTimeout(() => { win.print(); }, 300);
   };
 
   const esClaro = tema.texto === "#0f172a";
@@ -285,13 +362,21 @@ export default function POSPage() {
           cursor:pointer; font-family:'Syne',sans-serif; margin-top:16px;
         }
         .search-hint { font-size:13px; color:${tema.subtexto}; padding:20px; text-align:center; }
+        .pos-fullscreen { position:fixed; inset:0; z-index:9999; }
+        .shortcut-badge { display:inline-flex; align-items:center; gap:4px; padding:2px 8px; border-radius:6px; background:${tema.card}; border:1px solid ${tema.borde}; font-size:10px; color:${tema.subtexto}; font-family:monospace; }
       `}</style>
 
-      <div className="pos-root">
+      <div className={`pos-root ${fullscreen ? "pos-fullscreen" : ""}`}>
         <div className="pos-header">
           <div className="pos-header-left">
-            <button className="back-btn" onClick={() => window.location.href="/dashboard"}>Volver</button>
+            {!fullscreen && <button className="back-btn" onClick={() => window.location.href="/dashboard"}>Volver</button>}
             <h1 className="pos-title"><span>Punto</span> de Venta</h1>
+          </div>
+          <div style={{ display:"flex", gap:8, alignItems:"center" }}>
+            <span style={{ fontSize:11, color:tema.subtexto }}>F2 Buscar | F4 Cobrar | F8 Pantalla completa | ESC Limpiar</span>
+            <button className="back-btn" onClick={() => setFullscreen(f => !f)}>
+              {fullscreen ? "Salir" : "Pantalla completa"}
+            </button>
           </div>
         </div>
 
@@ -418,9 +503,14 @@ export default function POSPage() {
             <p>No. {ventaCreada.numero}</p>
             <div className="total-display">{formatCurrency(ventaCreada.total)}</div>
             {ventaCreada.cambio > 0 && <p>Cambio: {formatCurrency(ventaCreada.cambio)}</p>}
-            <button className="btn-new-sale" onClick={() => { setExito(false); setVentaCreada(null); inputRef.current?.focus(); }}>
-              Nueva Venta
-            </button>
+            <div style={{ display:"flex", gap:10, justifyContent:"center", marginTop:16 }}>
+              <button className="btn-new-sale" style={{ background:`linear-gradient(135deg, #059669, #10b981)` }} onClick={() => { imprimirRecibo(ventaCreada); }}>
+                Imprimir Recibo
+              </button>
+              <button className="btn-new-sale" onClick={() => { setExito(false); setVentaCreada(null); inputRef.current?.focus(); }}>
+                Nueva Venta
+              </button>
+            </div>
           </div>
         </div>
       )}

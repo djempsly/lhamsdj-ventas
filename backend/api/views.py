@@ -26,6 +26,10 @@ from .models import (
     Cliente, Proveedor, Venta, DetalleVenta, CuadreCaja, AnalisisAI,
     FacturaElectronica, Compra, DetalleCompra,
     CuentaBancaria, MovimientoBancario, Conciliacion,
+    Cotizacion, OrdenCompra,
+    CuentaPorCobrar, CuentaPorPagar, Pago,
+    Departamento, Empleado, Nomina, DetalleNomina, Vacacion,
+    EtapaCRM, Oportunidad, ActividadCRM, TasaCambio,
 )
 from .serializers import (
     PaisSerializer, MonedaSerializer, NegocioSerializer, SucursalSerializer,
@@ -35,10 +39,17 @@ from .serializers import (
     AnalisisAISerializer,
     CompraSerializer, PeriodoContableSerializer,
     CuentaBancariaSerializer, MovimientoBancarioSerializer, ConciliacionSerializer,
+    CotizacionSerializer, OrdenCompraSerializer,
+    CuentaPorCobrarSerializer, CuentaPorPagarSerializer, PagoSerializer,
+    DepartamentoSerializer, EmpleadoSerializer, NominaSerializer, DetalleNominaSerializer, VacacionSerializer,
+    EtapaCRMSerializer, OportunidadSerializer, ActividadCRMSerializer, TasaCambioSerializer,
 )
 from .permissions import (
     IsNegocioMember, CanEmitECF, CanViewReports,
     CanExportData, CanManageProducts, CanManageUsers,
+    CanManageAccounting, CanManageHR, CanManagePurchases,
+    CanManageBanking, CanApprovePurchaseOrders, CanManageCRM,
+    IsAdminRole, IsManagementRole, IsSalesRole, ReadOnly,
 )
 from .utils.ecf_generator import ECFGenerator
 from .utils.xml_signer import sign_ecf_xml
@@ -864,7 +875,7 @@ class AnalisisAIViewSet(viewsets.ReadOnlyModelViewSet):
 
 class CompraViewSet(viewsets.ModelViewSet):
     serializer_class = CompraSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, CanManagePurchases]
 
     def get_queryset(self):
         return Compra.objects.filter(
@@ -1037,7 +1048,7 @@ class PeriodoContableViewSet(viewsets.ModelViewSet):
 
 class CuentaBancariaViewSet(viewsets.ModelViewSet):
     serializer_class = CuentaBancariaSerializer
-    permission_classes = [IsAuthenticated]
+    permission_classes = [IsAuthenticated, CanManageBanking]
 
     def get_queryset(self):
         return CuentaBancaria.objects.filter(negocio=self.request.user.negocio)
@@ -1153,3 +1164,730 @@ class CuentaBancariaViewSet(viewsets.ModelViewSet):
             'movimientos_pendientes': movimientos.filter(conciliado=False).count(),
             'diferencia': float(conciliacion.diferencia),
         })
+
+
+# =============================================================================
+# COTIZACIONES (Fase 3A)
+# =============================================================================
+
+class CotizacionViewSet(viewsets.ModelViewSet):
+    serializer_class = CotizacionSerializer
+    permission_classes = [IsAuthenticated, IsSalesRole]
+
+    def get_queryset(self):
+        qs = Cotizacion.objects.filter(negocio=self.request.user.negocio)
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+        return qs.select_related('cliente', 'vendedor')
+
+    def perform_create(self, serializer):
+        negocio = self.request.user.negocio
+        count = Cotizacion.objects.filter(negocio=negocio).count()
+        serializer.save(
+            negocio=negocio,
+            vendedor=self.request.user,
+            numero=f"COT-{count + 1:06d}",
+        )
+
+    @action(detail=True, methods=['post'])
+    def enviar(self, request, pk=None):
+        """Marca la cotización como enviada."""
+        cot = self.get_object()
+        if cot.estado != 'BORRADOR':
+            raise ValidationError('Solo cotizaciones en borrador pueden enviarse.')
+        cot.estado = 'ENVIADA'
+        cot.save(update_fields=['estado'])
+        return Response({'status': 'Cotización enviada'})
+
+    @action(detail=True, methods=['post'])
+    def aceptar(self, request, pk=None):
+        """Acepta la cotización."""
+        cot = self.get_object()
+        if cot.estado not in ('BORRADOR', 'ENVIADA'):
+            raise ValidationError('Solo cotizaciones borrador/enviadas pueden aceptarse.')
+        cot.estado = 'ACEPTADA'
+        cot.save(update_fields=['estado'])
+        return Response({'status': 'Cotización aceptada'})
+
+    @action(detail=True, methods=['post'])
+    def facturar(self, request, pk=None):
+        """Convierte cotización aceptada en venta."""
+        cot = self.get_object()
+        if cot.estado != 'ACEPTADA':
+            raise ValidationError('Solo cotizaciones aceptadas pueden facturarse.')
+
+        with transaction.atomic():
+            negocio = cot.negocio
+            count = Venta.objects.filter(negocio=negocio).count()
+
+            venta = Venta.objects.create(
+                negocio=negocio,
+                sucursal=cot.sucursal,
+                numero=f"V-{count + 1:06d}",
+                cliente=cot.cliente,
+                cajero=request.user,
+                subtotal=cot.subtotal,
+                descuento=cot.descuento,
+                total_impuestos=cot.total_impuestos,
+                total=cot.total,
+                tipo_pago='CREDITO',
+                estado='BORRADOR',
+                notas=f'Generada desde cotización {cot.numero}',
+            )
+
+            for det in cot.detalles.all():
+                DetalleVenta.objects.create(
+                    venta=venta,
+                    producto=det.producto,
+                    cantidad=det.cantidad,
+                    precio_unitario=det.precio_unitario,
+                    precio_costo=det.producto.precio_costo,
+                    descuento=det.descuento,
+                    subtotal=det.subtotal,
+                    impuesto=det.impuesto,
+                    total=det.total,
+                )
+
+            cot.estado = 'FACTURADA'
+            cot.venta = venta
+            cot.save(update_fields=['estado', 'venta'])
+
+        return Response({
+            'status': 'Venta creada',
+            'venta_id': str(venta.id),
+            'venta_numero': venta.numero,
+        })
+
+
+# =============================================================================
+# ÓRDENES DE COMPRA (Fase 3A)
+# =============================================================================
+
+class OrdenCompraViewSet(viewsets.ModelViewSet):
+    serializer_class = OrdenCompraSerializer
+    permission_classes = [IsAuthenticated, CanManagePurchases]
+
+    def get_queryset(self):
+        qs = OrdenCompra.objects.filter(negocio=self.request.user.negocio)
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+        return qs.select_related('proveedor')
+
+    def perform_create(self, serializer):
+        negocio = self.request.user.negocio
+        count = OrdenCompra.objects.filter(negocio=negocio).count()
+        serializer.save(
+            negocio=negocio,
+            solicitado_por=self.request.user,
+            numero=f"OC-{count + 1:06d}",
+        )
+
+    @action(detail=True, methods=['post'])
+    def aprobar(self, request, pk=None):
+        """Aprueba una orden de compra."""
+        orden = self.get_object()
+        if orden.estado != 'PENDIENTE_APROBACION':
+            raise ValidationError('Solo órdenes pendientes pueden aprobarse.')
+
+        if request.user.rol not in ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'GERENTE'):
+            raise PermissionDenied('No tiene permisos para aprobar órdenes.')
+
+        orden.estado = 'APROBADA'
+        orden.aprobado_por = request.user
+        orden.fecha_aprobacion = timezone.now()
+        orden.save(update_fields=['estado', 'aprobado_por', 'fecha_aprobacion'])
+        return Response({'status': 'Orden aprobada'})
+
+    @action(detail=True, methods=['post'])
+    def enviar(self, request, pk=None):
+        """Envía la orden al proveedor."""
+        orden = self.get_object()
+        if orden.estado != 'APROBADA':
+            raise ValidationError('Solo órdenes aprobadas pueden enviarse.')
+        orden.estado = 'ENVIADA'
+        orden.save(update_fields=['estado'])
+        return Response({'status': 'Orden enviada al proveedor'})
+
+    @action(detail=True, methods=['post'], url_path='convertir-compra')
+    def convertir_compra(self, request, pk=None):
+        """Convierte orden de compra aprobada/enviada en compra."""
+        orden = self.get_object()
+        if orden.estado not in ('APROBADA', 'ENVIADA'):
+            raise ValidationError('Solo órdenes aprobadas/enviadas pueden convertirse.')
+
+        with transaction.atomic():
+            negocio = orden.negocio
+            count = Compra.objects.filter(negocio=negocio).count()
+
+            compra = Compra.objects.create(
+                negocio=negocio,
+                proveedor=orden.proveedor,
+                almacen=orden.almacen or Almacen.objects.filter(negocio=negocio, es_principal=True).first(),
+                numero=f"CMP-{count + 1:06d}",
+                fecha=timezone.now().date(),
+                subtotal=orden.subtotal,
+                total_impuestos=orden.total_impuestos,
+                total=orden.total,
+                estado='BORRADOR',
+                notas=f'Generada desde OC {orden.numero}',
+            )
+
+            for det in orden.detalles.all():
+                from .models import DetalleCompra
+                DetalleCompra.objects.create(
+                    compra=compra,
+                    producto=det.producto,
+                    cantidad=det.cantidad,
+                    precio_unitario=det.precio_unitario,
+                    subtotal=det.subtotal,
+                    impuesto=det.impuesto,
+                    total=det.total,
+                )
+
+            orden.estado = 'RECIBIDA'
+            orden.compra = compra
+            orden.save(update_fields=['estado', 'compra'])
+
+        return Response({
+            'status': 'Compra creada',
+            'compra_id': str(compra.id),
+        })
+
+
+# =============================================================================
+# CUENTAS POR COBRAR / PAGAR (Fase 3B)
+# =============================================================================
+
+class CuentaPorCobrarViewSet(viewsets.ModelViewSet):
+    serializer_class = CuentaPorCobrarSerializer
+    permission_classes = [IsAuthenticated, CanManageAccounting]
+
+    def get_queryset(self):
+        qs = CuentaPorCobrar.objects.filter(negocio=self.request.user.negocio)
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+        return qs.select_related('cliente')
+
+    def perform_create(self, serializer):
+        negocio = self.request.user.negocio
+        count = CuentaPorCobrar.objects.filter(negocio=negocio).count()
+        serializer.save(negocio=negocio, numero=f"CXC-{count + 1:06d}")
+
+    @action(detail=False, methods=['get'], url_path='aging')
+    def aging_report(self, request):
+        """Reporte de antigüedad de saldos."""
+        negocio = request.user.negocio
+        hoy = timezone.now().date()
+        cxc = CuentaPorCobrar.objects.filter(
+            negocio=negocio, estado__in=['PENDIENTE', 'PARCIAL', 'VENCIDA'],
+        ).select_related('cliente')
+
+        buckets = {'corriente': [], '1_30': [], '31_60': [], '61_90': [], 'mas_90': []}
+        totals = {'corriente': 0, '1_30': 0, '31_60': 0, '61_90': 0, 'mas_90': 0}
+
+        for cuenta in cxc:
+            dias = (hoy - cuenta.fecha_vencimiento).days
+            saldo = float(cuenta.saldo_pendiente)
+            item = {
+                'id': str(cuenta.id),
+                'cliente': cuenta.cliente.nombre,
+                'numero': cuenta.numero,
+                'saldo': saldo,
+                'dias': dias,
+                'fecha_vencimiento': str(cuenta.fecha_vencimiento),
+            }
+            if dias <= 0:
+                buckets['corriente'].append(item)
+                totals['corriente'] += saldo
+            elif dias <= 30:
+                buckets['1_30'].append(item)
+                totals['1_30'] += saldo
+            elif dias <= 60:
+                buckets['31_60'].append(item)
+                totals['31_60'] += saldo
+            elif dias <= 90:
+                buckets['61_90'].append(item)
+                totals['61_90'] += saldo
+            else:
+                buckets['mas_90'].append(item)
+                totals['mas_90'] += saldo
+
+        return Response({'buckets': buckets, 'totals': totals})
+
+
+class CuentaPorPagarViewSet(viewsets.ModelViewSet):
+    serializer_class = CuentaPorPagarSerializer
+    permission_classes = [IsAuthenticated, CanManageAccounting]
+
+    def get_queryset(self):
+        qs = CuentaPorPagar.objects.filter(negocio=self.request.user.negocio)
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+        return qs.select_related('proveedor')
+
+    def perform_create(self, serializer):
+        negocio = self.request.user.negocio
+        count = CuentaPorPagar.objects.filter(negocio=negocio).count()
+        serializer.save(negocio=negocio, numero=f"CXP-{count + 1:06d}")
+
+    @action(detail=False, methods=['get'], url_path='aging')
+    def aging_report(self, request):
+        """Reporte de antigüedad de saldos CxP."""
+        negocio = request.user.negocio
+        hoy = timezone.now().date()
+        cxp = CuentaPorPagar.objects.filter(
+            negocio=negocio, estado__in=['PENDIENTE', 'PARCIAL', 'VENCIDA'],
+        ).select_related('proveedor')
+
+        buckets = {'corriente': [], '1_30': [], '31_60': [], '61_90': [], 'mas_90': []}
+        totals = {'corriente': 0, '1_30': 0, '31_60': 0, '61_90': 0, 'mas_90': 0}
+
+        for cuenta in cxp:
+            dias = (hoy - cuenta.fecha_vencimiento).days
+            saldo = float(cuenta.saldo_pendiente)
+            item = {
+                'id': str(cuenta.id),
+                'proveedor': cuenta.proveedor.nombre,
+                'numero': cuenta.numero,
+                'saldo': saldo,
+                'dias': dias,
+                'fecha_vencimiento': str(cuenta.fecha_vencimiento),
+            }
+            if dias <= 0:
+                buckets['corriente'].append(item)
+                totals['corriente'] += saldo
+            elif dias <= 30:
+                buckets['1_30'].append(item)
+                totals['1_30'] += saldo
+            elif dias <= 60:
+                buckets['31_60'].append(item)
+                totals['31_60'] += saldo
+            elif dias <= 90:
+                buckets['61_90'].append(item)
+                totals['61_90'] += saldo
+            else:
+                buckets['mas_90'].append(item)
+                totals['mas_90'] += saldo
+
+        return Response({'buckets': buckets, 'totals': totals})
+
+
+class PagoViewSet(viewsets.ModelViewSet):
+    serializer_class = PagoSerializer
+    permission_classes = [IsAuthenticated, CanManageAccounting]
+
+    def get_queryset(self):
+        return Pago.objects.filter(negocio=self.request.user.negocio)
+
+    def perform_create(self, serializer):
+        pago = serializer.save(negocio=self.request.user.negocio, creado_por=self.request.user)
+
+        # Apply payment to CxC or CxP
+        if pago.cuenta_por_cobrar:
+            cxc = pago.cuenta_por_cobrar
+            cxc.monto_pagado += pago.monto
+            cxc.saldo_pendiente = cxc.monto_original - cxc.monto_pagado
+            cxc.estado = 'PAGADA' if cxc.saldo_pendiente <= 0 else 'PARCIAL'
+            cxc.save(update_fields=['monto_pagado', 'saldo_pendiente', 'estado'])
+
+        if pago.cuenta_por_pagar:
+            cxp = pago.cuenta_por_pagar
+            cxp.monto_pagado += pago.monto
+            cxp.saldo_pendiente = cxp.monto_original - cxp.monto_pagado
+            cxp.estado = 'PAGADA' if cxp.saldo_pendiente <= 0 else 'PARCIAL'
+            cxp.save(update_fields=['monto_pagado', 'saldo_pendiente', 'estado'])
+
+
+# =============================================================================
+# HR / NÓMINA (Fase 5A)
+# =============================================================================
+
+class DepartamentoViewSet(viewsets.ModelViewSet):
+    serializer_class = DepartamentoSerializer
+    permission_classes = [IsAuthenticated, CanManageHR]
+
+    def get_queryset(self):
+        return Departamento.objects.filter(negocio=self.request.user.negocio)
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+
+class EmpleadoViewSet(viewsets.ModelViewSet):
+    serializer_class = EmpleadoSerializer
+    permission_classes = [IsAuthenticated, CanManageHR]
+
+    def get_queryset(self):
+        qs = Empleado.objects.filter(negocio=self.request.user.negocio)
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+        return qs.select_related('departamento')
+
+    def perform_create(self, serializer):
+        negocio = self.request.user.negocio
+        count = Empleado.objects.filter(negocio=negocio).count()
+        serializer.save(negocio=negocio, codigo=f"EMP-{count + 1:04d}")
+
+
+class NominaViewSet(viewsets.ModelViewSet):
+    serializer_class = NominaSerializer
+    permission_classes = [IsAuthenticated, CanManageHR]
+
+    def get_queryset(self):
+        return Nomina.objects.filter(negocio=self.request.user.negocio).prefetch_related('detalles')
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=True, methods=['post'])
+    def calcular(self, request, pk=None):
+        """Calcula la nómina para todos los empleados activos."""
+        from decimal import Decimal as D
+
+        nomina = self.get_object()
+        if nomina.estado not in ('BORRADOR', 'CALCULADA'):
+            raise ValidationError('Solo nóminas borrador/calculadas pueden recalcularse.')
+
+        negocio = request.user.negocio
+        empleados = Empleado.objects.filter(negocio=negocio, estado='ACTIVO')
+
+        # Clear previous calculation
+        nomina.detalles.all().delete()
+
+        total_bruto = D('0')
+        total_deducciones = D('0')
+        total_patronal = D('0')
+        total_neto = D('0')
+
+        # TSS rates (Dominican Republic 2024)
+        SFS_EMPLEADO = D('0.0304')   # 3.04%
+        AFP_EMPLEADO = D('0.0287')   # 2.87%
+        SFS_PATRONAL = D('0.0709')   # 7.09%
+        AFP_PATRONAL = D('0.0710')   # 7.10%
+        SRL_RATE = D('0.0110')       # 1.10%
+        INFOTEP_RATE = D('0.0100')   # 1.00%
+
+        # ISR brackets (annual -> monthly)
+        ISR_EXEMPT = D('416220') / 12
+        ISR_BRACKETS = [
+            (D('624329') / 12, D('0.15')),
+            (D('867123') / 12, D('0.20')),
+            (D('999999999'), D('0.25')),
+        ]
+
+        for emp in empleados:
+            salario = emp.salario_bruto
+            total_ingresos = salario
+
+            # Employee deductions
+            sfs_emp = salario * SFS_EMPLEADO
+            afp_emp = salario * AFP_EMPLEADO
+
+            # ISR calculation (simplified)
+            renta_gravable = salario - sfs_emp - afp_emp
+            isr = D('0')
+            if renta_gravable > ISR_EXEMPT:
+                excedente = renta_gravable - ISR_EXEMPT
+                prev_limit = ISR_EXEMPT
+                for bracket_limit, rate in ISR_BRACKETS:
+                    if excedente <= 0:
+                        break
+                    bracket_amount = min(excedente, bracket_limit - prev_limit)
+                    isr += bracket_amount * rate
+                    excedente -= bracket_amount
+                    prev_limit = bracket_limit
+
+            total_ded = sfs_emp + afp_emp + isr
+            neto = total_ingresos - total_ded
+
+            # Employer contributions
+            sfs_pat = salario * SFS_PATRONAL
+            afp_pat = salario * AFP_PATRONAL
+            srl_val = salario * SRL_RATE
+            infotep_val = salario * INFOTEP_RATE
+            total_pat = sfs_pat + afp_pat + srl_val + infotep_val
+
+            DetalleNomina.objects.create(
+                nomina=nomina,
+                empleado=emp,
+                salario_bruto=salario,
+                total_ingresos=total_ingresos,
+                sfs_empleado=sfs_emp.quantize(D('0.01')),
+                afp_empleado=afp_emp.quantize(D('0.01')),
+                isr=isr.quantize(D('0.01')),
+                total_deducciones=total_ded.quantize(D('0.01')),
+                sfs_patronal=sfs_pat.quantize(D('0.01')),
+                afp_patronal=afp_pat.quantize(D('0.01')),
+                srl=srl_val.quantize(D('0.01')),
+                infotep=infotep_val.quantize(D('0.01')),
+                total_aportes_patronales=total_pat.quantize(D('0.01')),
+                salario_neto=neto.quantize(D('0.01')),
+            )
+
+            total_bruto += salario
+            total_deducciones += total_ded
+            total_patronal += total_pat
+            total_neto += neto
+
+        nomina.total_bruto = total_bruto.quantize(D('0.01'))
+        nomina.total_deducciones = total_deducciones.quantize(D('0.01'))
+        nomina.total_aportes_patronales = total_patronal.quantize(D('0.01'))
+        nomina.total_neto = total_neto.quantize(D('0.01'))
+        nomina.estado = 'CALCULADA'
+        nomina.save()
+
+        return Response(NominaSerializer(nomina).data)
+
+    @action(detail=True, methods=['post'])
+    def aprobar(self, request, pk=None):
+        nomina = self.get_object()
+        if nomina.estado != 'CALCULADA':
+            raise ValidationError('Solo nóminas calculadas pueden aprobarse.')
+        nomina.estado = 'APROBADA'
+        nomina.aprobado_por = request.user
+        nomina.save(update_fields=['estado', 'aprobado_por'])
+        return Response({'status': 'Nómina aprobada'})
+
+
+class VacacionViewSet(viewsets.ModelViewSet):
+    serializer_class = VacacionSerializer
+    permission_classes = [IsAuthenticated, CanManageHR]
+
+    def get_queryset(self):
+        return Vacacion.objects.filter(negocio=self.request.user.negocio)
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=True, methods=['post'])
+    def aprobar(self, request, pk=None):
+        vacacion = self.get_object()
+        if vacacion.estado != 'SOLICITADA':
+            raise ValidationError('Solo vacaciones solicitadas pueden aprobarse.')
+        vacacion.estado = 'APROBADA'
+        vacacion.aprobado_por = request.user
+        vacacion.save(update_fields=['estado', 'aprobado_por'])
+        return Response({'status': 'Vacación aprobada'})
+
+
+# =============================================================================
+# CRM (Fase 5B)
+# =============================================================================
+
+class EtapaCRMViewSet(viewsets.ModelViewSet):
+    serializer_class = EtapaCRMSerializer
+    permission_classes = [IsAuthenticated, CanManageCRM]
+
+    def get_queryset(self):
+        return EtapaCRM.objects.filter(negocio=self.request.user.negocio)
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+
+class OportunidadViewSet(viewsets.ModelViewSet):
+    serializer_class = OportunidadSerializer
+    permission_classes = [IsAuthenticated, CanManageCRM]
+
+    def get_queryset(self):
+        qs = Oportunidad.objects.filter(negocio=self.request.user.negocio)
+        estado = self.request.query_params.get('estado')
+        etapa = self.request.query_params.get('etapa')
+        if estado:
+            qs = qs.filter(estado=estado)
+        if etapa:
+            qs = qs.filter(etapa_id=etapa)
+        return qs.select_related('cliente', 'etapa', 'asignado_a').prefetch_related('actividades')
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=False, methods=['get'])
+    def pipeline(self, request):
+        """Vista kanban del pipeline."""
+        negocio = request.user.negocio
+        etapas = EtapaCRM.objects.filter(negocio=negocio, activa=True)
+
+        result = []
+        for etapa in etapas:
+            oportunidades = Oportunidad.objects.filter(
+                negocio=negocio, etapa=etapa, estado='ABIERTA',
+            ).select_related('cliente', 'asignado_a')
+
+            result.append({
+                'id': str(etapa.id),
+                'nombre': etapa.nombre,
+                'color': etapa.color,
+                'probabilidad': etapa.probabilidad,
+                'oportunidades': OportunidadSerializer(oportunidades, many=True).data,
+                'valor_total': float(oportunidades.aggregate(t=Sum('valor_estimado'))['t'] or 0),
+                'count': oportunidades.count(),
+            })
+
+        return Response(result)
+
+    @action(detail=True, methods=['post'], url_path='mover-etapa')
+    def mover_etapa(self, request, pk=None):
+        """Mueve una oportunidad a otra etapa."""
+        op = self.get_object()
+        nueva_etapa_id = request.data.get('etapa_id')
+        if not nueva_etapa_id:
+            raise ValidationError('etapa_id es requerido.')
+        op.etapa_id = nueva_etapa_id
+        op.save(update_fields=['etapa_id', 'actualizado_en'])
+        return Response({'status': 'Etapa actualizada'})
+
+    @action(detail=True, methods=['post'])
+    def ganar(self, request, pk=None):
+        """Marca oportunidad como ganada."""
+        op = self.get_object()
+        op.estado = 'GANADA'
+        op.save(update_fields=['estado', 'actualizado_en'])
+        return Response({'status': 'Oportunidad ganada'})
+
+    @action(detail=True, methods=['post'])
+    def perder(self, request, pk=None):
+        """Marca oportunidad como perdida."""
+        op = self.get_object()
+        op.estado = 'PERDIDA'
+        op.razon_perdida = request.data.get('razon', '')
+        op.save(update_fields=['estado', 'razon_perdida', 'actualizado_en'])
+        return Response({'status': 'Oportunidad perdida'})
+
+
+class ActividadCRMViewSet(viewsets.ModelViewSet):
+    serializer_class = ActividadCRMSerializer
+    permission_classes = [IsAuthenticated, CanManageCRM]
+
+    def get_queryset(self):
+        qs = ActividadCRM.objects.filter(negocio=self.request.user.negocio)
+        oportunidad = self.request.query_params.get('oportunidad')
+        if oportunidad:
+            qs = qs.filter(oportunidad_id=oportunidad)
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+
+# =============================================================================
+# MULTI-MONEDA (Fase 4A)
+# =============================================================================
+
+class TasaCambioViewSet(viewsets.ModelViewSet):
+    serializer_class = TasaCambioSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return TasaCambio.objects.all()
+
+    @action(detail=False, methods=['get'])
+    def actual(self, request):
+        """Obtiene las tasas de cambio más recientes."""
+        tasas = TasaCambio.objects.order_by('moneda_origen', 'moneda_destino', '-fecha') \
+            .distinct('moneda_origen', 'moneda_destino')
+
+        # Fallback for databases without DISTINCT ON (e.g., SQLite)
+        try:
+            data = TasaCambioSerializer(tasas, many=True).data
+        except Exception:
+            tasas = TasaCambio.objects.order_by('-fecha')[:20]
+            data = TasaCambioSerializer(tasas, many=True).data
+
+        return Response(data)
+
+
+# =============================================================================
+# EXCEL/PDF EXPORT (Fase 3D)
+# =============================================================================
+
+class ExportViewSet(viewsets.ViewSet):
+    """Endpoints de exportación a Excel/PDF."""
+    permission_classes = [IsAuthenticated]
+
+    @action(detail=False, methods=['get'], url_path='ventas-excel')
+    def ventas_excel(self, request):
+        """Exporta ventas a Excel."""
+        import openpyxl
+        from io import BytesIO
+
+        negocio = request.user.negocio
+        desde = request.query_params.get('desde')
+        hasta = request.query_params.get('hasta')
+
+        ventas = Venta.objects.filter(negocio=negocio, estado='COMPLETADA')
+        if desde:
+            ventas = ventas.filter(fecha__date__gte=desde)
+        if hasta:
+            ventas = ventas.filter(fecha__date__lte=hasta)
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Ventas"
+        ws.append(['Fecha', 'Numero', 'NCF', 'Cliente', 'Subtotal', 'ITBIS', 'Total', 'Estado', 'Pago'])
+
+        for v in ventas.select_related('cliente').order_by('-fecha')[:5000]:
+            ws.append([
+                v.fecha.strftime('%Y-%m-%d %H:%M'),
+                v.numero,
+                v.ncf or '',
+                v.cliente.nombre if v.cliente else 'Consumidor Final',
+                float(v.subtotal),
+                float(v.total_impuestos),
+                float(v.total),
+                v.estado,
+                v.tipo_pago,
+            ])
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        response = HttpResponse(
+            output.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="ventas_{negocio.identificacion_fiscal}.xlsx"'
+        return response
+
+    @action(detail=False, methods=['get'], url_path='compras-excel')
+    def compras_excel(self, request):
+        """Exporta compras a Excel."""
+        import openpyxl
+        from io import BytesIO
+
+        negocio = request.user.negocio
+        compras = Compra.objects.filter(negocio=negocio).select_related('proveedor').order_by('-fecha')[:5000]
+
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.title = "Compras"
+        ws.append(['Fecha', 'Numero', 'Proveedor', 'NCF', 'Subtotal', 'ITBIS', 'Total', 'Estado'])
+
+        for c in compras:
+            ws.append([
+                str(c.fecha),
+                c.numero,
+                c.proveedor.nombre,
+                c.ncf_proveedor or '',
+                float(c.subtotal),
+                float(c.total_impuestos),
+                float(c.total),
+                c.estado,
+            ])
+
+        output = BytesIO()
+        wb.save(output)
+        output.seek(0)
+
+        response = HttpResponse(
+            output.read(),
+            content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        )
+        response['Content-Disposition'] = f'attachment; filename="compras_{negocio.identificacion_fiscal}.xlsx"'
+        return response

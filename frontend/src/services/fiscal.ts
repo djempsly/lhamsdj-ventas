@@ -1,10 +1,10 @@
 import api from "@/lib/axios";
 
 export const fiscalService = {
-  getPreview: (tipo: '606' | '607', year: number, month: number) =>
+  getPreview: (tipo: '606' | '607' | '608', year: number, month: number) =>
     api.get(`/reportes-fiscales/preview/?tipo=${tipo}&year=${year}&month=${month}`),
 
-  exportar: (tipo: '606' | '607', year: number, month: number) =>
+  exportar: (tipo: '606' | '607' | '608', year: number, month: number) =>
     api.get(`/reportes-fiscales/export/?tipo=${tipo}&year=${year}&month=${month}`, { responseType: 'blob' }),
 
   emitirECF: (ventaId: string) =>
