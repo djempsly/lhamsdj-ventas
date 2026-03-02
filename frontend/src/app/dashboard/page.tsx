@@ -276,11 +276,12 @@ export default function Dashboard() {
               { emoji:"INV", name:"Inventario",       desc:"Productos y stock", link: "/dashboard/productos" },
               { emoji:"CLI", name:"Clientes",         desc:"Gestion de clientes", link: "/dashboard/clientes" },
               { emoji:"PRV", name:"Proveedores",      desc:"Gestion de compras", link: "/dashboard/proveedores" },
-              { emoji:"FAC", name:"Facturacion",      desc:"e-CF DGII", link: "/dashboard/pos" },
-              { emoji:"RPT", name:"Reportes",         desc:"Analisis y estadisticas", link: "/dashboard/reportes" },
-              { emoji:"CTB", name:"Contabilidad",     desc:"Motor contable", link: "/dashboard/contabilidad" },
+              { emoji:"FAC", name:"Facturacion",      desc:"Historial y e-CF DGII", link: "/dashboard/ventas" },
+              { emoji:"CAJ", name:"Cuadres de Caja",  desc:"Apertura y cierre", link: "/dashboard/cuadres" },
+              { emoji:"RPT", name:"Reportes",         desc:"Reportes fiscales 606/607", link: "/dashboard/reportes" },
+              { emoji:"CTB", name:"Contabilidad",     desc:"Plan de cuentas", link: "/dashboard/contabilidad" },
               { emoji:"AI",  name:"AI Agent",         desc:"Analisis inteligente", link: "/dashboard/ai" },
-              { emoji:"CFG", name:"Configuracion",    desc:"Ajustes del sistema", link: "/dashboard/settings" },
+              { emoji:"CFG", name:"Configuracion",    desc:"Negocio, usuarios, sucursales", link: "/dashboard/settings" },
             ].map((m,i) => (
               <div className="menu-item" key={i} onClick={() => window.location.href = m.link}>
                 <div className="menu-emoji">{m.emoji}</div>

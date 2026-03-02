@@ -115,18 +115,59 @@ class DetalleVentaSerializer(serializers.ModelSerializer):
                   'precio_costo', 'descuento', 'subtotal', 'impuesto', 'total']
 
 
+class DetalleVentaWriteSerializer(serializers.Serializer):
+    """Serializer ligero para recibir detalles al crear una venta."""
+    producto = serializers.UUIDField()
+    cantidad = serializers.DecimalField(max_digits=12, decimal_places=2)
+    precio_unitario = serializers.DecimalField(max_digits=12, decimal_places=2)
+    descuento = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+
 class VentaSerializer(serializers.ModelSerializer):
     detalles = DetalleVentaSerializer(many=True, read_only=True)
+    detalles_input = DetalleVentaWriteSerializer(many=True, write_only=True, required=False)
     cajero_nombre = serializers.CharField(source='cajero.get_full_name', read_only=True)
     cliente_nombre = serializers.CharField(source='cliente.nombre', read_only=True)
-    
+
     class Meta:
         model = Venta
         fields = ['id', 'numero', 'tipo_comprobante', 'ncf', 'cliente', 'cliente_nombre',
                   'cajero', 'cajero_nombre', 'fecha', 'subtotal', 'descuento',
                   'total_impuestos', 'total', 'costo_total', 'ganancia', 'tipo_pago',
-                  'monto_pagado', 'cambio', 'estado', 'estado_fiscal', 'notas', 'detalles']
+                  'monto_pagado', 'cambio', 'estado', 'estado_fiscal', 'notas',
+                  'detalles', 'detalles_input']
         read_only_fields = ['numero', 'cajero', 'estado_fiscal']
+
+    def create(self, validated_data):
+        detalles_data = validated_data.pop('detalles_input', [])
+        venta = Venta.objects.create(**validated_data)
+
+        costo_total = 0
+        for item in detalles_data:
+            producto = Producto.objects.get(pk=item['producto'])
+            cantidad = item['cantidad']
+            precio_unitario = item['precio_unitario']
+            desc = item.get('descuento', 0)
+            precio_costo = producto.precio_costo
+            subtotal = cantidad * precio_unitario - desc
+            impuesto = subtotal * (producto.tasa_impuesto / 100) if producto.aplica_impuesto else 0
+            total_linea = subtotal + impuesto
+
+            DetalleVenta.objects.create(
+                venta=venta, producto=producto, cantidad=cantidad,
+                precio_unitario=precio_unitario, precio_costo=precio_costo,
+                descuento=desc, subtotal=subtotal, impuesto=impuesto, total=total_linea,
+            )
+            producto.stock_actual -= cantidad
+            producto.save(update_fields=['stock_actual'])
+            costo_total += precio_costo * cantidad
+
+        if detalles_data:
+            venta.costo_total = costo_total
+            venta.ganancia = venta.total - costo_total
+            venta.save(update_fields=['costo_total', 'ganancia'])
+
+        return venta
 
 
 class CuadreCajaSerializer(serializers.ModelSerializer):
