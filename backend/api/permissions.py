@@ -30,6 +30,8 @@ ADMIN_ROLES = ('SUPER_ADMIN', 'ADMIN_NEGOCIO')
 MANAGEMENT_ROLES = ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'GERENTE')
 ACCOUNTING_ROLES = ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'CONTADOR', 'GERENTE')
 SALES_ROLES = ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'GERENTE', 'VENDEDOR', 'CAJERO')
+AUDIT_ROLES = ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'AUDITOR')
+INVENTORY_ROLES = ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'GERENTE', 'ALMACEN', 'INVENTARIO')
 
 
 class IsAdminRole(BasePermission):
@@ -60,6 +62,22 @@ class IsSalesRole(BasePermission):
         return request.user.rol in SALES_ROLES
 
 
+class IsAuditRole(BasePermission):
+    """SUPER_ADMIN, ADMIN_NEGOCIO, AUDITOR - read-only audit access."""
+
+    def has_permission(self, request, view):
+        if request.user.rol in AUDIT_ROLES:
+            return True
+        return False
+
+
+class IsInventoryRole(BasePermission):
+    """Roles that manage inventory."""
+
+    def has_permission(self, request, view):
+        return request.user.rol in INVENTORY_ROLES
+
+
 # =============================================================================
 # FEATURE PERMISSIONS
 # =============================================================================
@@ -75,7 +93,7 @@ class CanViewReports(BasePermission):
     """Only authorized roles can view fiscal reports."""
 
     def has_permission(self, request, view):
-        if request.user.rol in ACCOUNTING_ROLES:
+        if request.user.rol in (*ACCOUNTING_ROLES, 'AUDITOR'):
             return True
         return request.user.puede_ver_reportes
 
@@ -84,7 +102,7 @@ class CanExportData(BasePermission):
     """Only authorized roles can export data."""
 
     def has_permission(self, request, view):
-        if request.user.rol in ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'CONTADOR'):
+        if request.user.rol in ('SUPER_ADMIN', 'ADMIN_NEGOCIO', 'CONTADOR', 'AUDITOR'):
             return True
         return request.user.puede_exportar_datos
 
@@ -114,7 +132,7 @@ class CanManageAccounting(BasePermission):
 
     def has_permission(self, request, view):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return request.user.rol in (*ACCOUNTING_ROLES, 'VENDEDOR')
+            return request.user.rol in (*ACCOUNTING_ROLES, 'VENDEDOR', 'AUDITOR')
         return request.user.rol in ACCOUNTING_ROLES
 
 
@@ -132,7 +150,7 @@ class CanManagePurchases(BasePermission):
 
     def has_permission(self, request, view):
         if request.method in ('GET', 'HEAD', 'OPTIONS'):
-            return request.user.rol in (*MANAGEMENT_ROLES, 'ALMACEN')
+            return request.user.rol in (*MANAGEMENT_ROLES, 'ALMACEN', 'INVENTARIO')
         return request.user.rol in MANAGEMENT_ROLES
 
 
@@ -155,3 +173,95 @@ class CanManageCRM(BasePermission):
 
     def has_permission(self, request, view):
         return request.user.rol in (*MANAGEMENT_ROLES, 'VENDEDOR')
+
+
+class CanMakeDiscounts(BasePermission):
+    """Validates discount capability."""
+
+    def has_permission(self, request, view):
+        if request.user.rol == 'SUPER_ADMIN':
+            return True
+        if request.user.puede_hacer_descuentos:
+            return True
+        return request.user.rol in ('ADMIN_NEGOCIO', 'GERENTE', 'CAJERO', 'VENDEDOR')
+
+
+class CanVoidSales(BasePermission):
+    """Only authorized users can void/cancel sales."""
+
+    def has_permission(self, request, view):
+        if request.user.rol in MANAGEMENT_ROLES:
+            return True
+        return request.user.puede_anular_ventas
+
+
+class CanManageApiKeys(BasePermission):
+    """Only admins can manage API keys."""
+
+    def has_permission(self, request, view):
+        return request.user.rol in ADMIN_ROLES
+
+
+class CanViewAuditLogs(BasePermission):
+    """Audit log access for admins and auditors."""
+
+    def has_permission(self, request, view):
+        return request.user.rol in AUDIT_ROLES
+
+
+class CanManageSecurity(BasePermission):
+    """Security management (alerts, IP blocks, sessions)."""
+
+    def has_permission(self, request, view):
+        return request.user.rol in ADMIN_ROLES
+
+
+# =============================================================================
+# SEPARATION OF DUTIES
+# =============================================================================
+
+class RequiresDifferentApprover(BasePermission):
+    """
+    Ensures the person approving is different from who requested.
+    Used for high-value transactions, discounts, voids.
+    """
+
+    def has_object_permission(self, request, view, obj):
+        # The person confirming must be different from the requestor
+        solicitado_por = getattr(obj, 'solicitado_por_id', None)
+        if solicitado_por and str(solicitado_por) == str(request.user.id):
+            return False
+        return True
+
+
+# =============================================================================
+# API KEY SCOPE PERMISSIONS
+# =============================================================================
+
+class HasApiKeyScope(BasePermission):
+    """Check API key has required scope for the endpoint."""
+
+    def has_permission(self, request, view):
+        # If not using API key auth, allow (other permissions will check)
+        if not hasattr(request, 'api_key_scopes'):
+            return True
+
+        scopes = request.api_key_scopes
+        # Derive required scope from view
+        resource = getattr(view, 'api_key_resource', '')
+        if not resource:
+            return False
+
+        method_map = {
+            'GET': 'read',
+            'HEAD': 'read',
+            'OPTIONS': 'read',
+            'POST': 'write',
+            'PUT': 'write',
+            'PATCH': 'write',
+            'DELETE': 'delete',
+        }
+        action = method_map.get(request.method, 'read')
+        required_scope = f'{resource}:{action}'
+
+        return required_scope in scopes or f'{resource}:*' in scopes

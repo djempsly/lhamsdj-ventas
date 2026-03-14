@@ -97,9 +97,21 @@ class Negocio(models.Model):
     api_fiscal_clave = models.CharField(max_length=255, blank=True)  # Encriptado
     ambiente_fiscal = models.CharField(max_length=10, choices=[('TEST', 'Pruebas'), ('PROD', 'Producción')], default='TEST')
     
-    # Configuración contable
+    # Configuracion contable
     plan_cuentas_activo = models.BooleanField(default=True)
     cierre_automatico = models.BooleanField(default=False)
+
+    # Seguridad del negocio
+    umbral_confirmacion = models.DecimalField(
+        max_digits=12, decimal_places=2, default=1000,
+        help_text="Monto a partir del cual se requiere doble confirmacion"
+    )
+    paises_permitidos = models.JSONField(
+        default=list, blank=True,
+        help_text="ISO 3166-1 alfa-2 codes permitidos para acceso (vacio = sin restriccion)"
+    )
+    horario_acceso_inicio = models.TimeField(null=True, blank=True)
+    horario_acceso_fin = models.TimeField(null=True, blank=True)
 
     # Metadatos
     creado_en = models.DateTimeField(auto_now_add=True)
@@ -152,7 +164,9 @@ class Usuario(AbstractUser):
         ('CONTADOR', 'Contador'),
         ('CAJERO', 'Cajero'),
         ('VENDEDOR', 'Vendedor'),
-        ('ALMACEN', 'Encargado de Almacén'),
+        ('ALMACEN', 'Encargado de Almacen'),
+        ('AUDITOR', 'Auditor'),
+        ('INVENTARIO', 'Encargado de Inventario'),
     ]
     
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -173,16 +187,39 @@ class Usuario(AbstractUser):
     
     # Seguridad
     two_factor_enabled = models.BooleanField(default=False)
-    two_factor_secret = models.CharField(max_length=32, blank=True)
+    two_factor_secret = models.CharField(max_length=512, blank=True)
+    backup_codes = models.JSONField(default=list, blank=True, help_text="Hashed backup codes for 2FA recovery")
     intentos_fallidos = models.IntegerField(default=0)
     cuenta_bloqueada_hasta = models.DateTimeField(null=True, blank=True)
     ultimo_cambio_password = models.DateTimeField(auto_now_add=True)
     forzar_cambio_password = models.BooleanField(default=False)
-    
+    max_descuento = models.DecimalField(
+        max_digits=5, decimal_places=2, null=True, blank=True,
+        help_text="Override del limite de descuento por rol"
+    )
+    ips_conocidas = models.JSONField(default=list, blank=True)
+    horario_acceso_inicio = models.TimeField(null=True, blank=True)
+    horario_acceso_fin = models.TimeField(null=True, blank=True)
+
     # Metadatos
     creado_en = models.DateTimeField(auto_now_add=True)
     ultimo_acceso = models.DateTimeField(null=True, blank=True)
-    
+
+    @property
+    def esta_bloqueado(self):
+        if self.cuenta_bloqueada_hasta and self.cuenta_bloqueada_hasta > timezone.now():
+            return True
+        return False
+
+    @property
+    def password_expirado(self):
+        from django.conf import settings
+        if not self.ultimo_cambio_password:
+            return True
+        days = getattr(settings, 'PASSWORD_EXPIRY_DAYS', 90)
+        from datetime import timedelta
+        return timezone.now() > self.ultimo_cambio_password + timedelta(days=days)
+
     def __str__(self):
         return f"{self.get_full_name() or self.username} ({self.get_rol_display()})"
 
@@ -192,10 +229,10 @@ class Usuario(AbstractUser):
 # =============================================================================
 
 class AuditLog(models.Model):
-    """Registro de auditoría de TODAS las acciones"""
+    """Registro de auditoria INMUTABLE de TODAS las acciones"""
     ACCION_CHOICES = [
-        ('LOGIN', 'Inicio de Sesión'),
-        ('LOGOUT', 'Cierre de Sesión'),
+        ('LOGIN', 'Inicio de Sesion'),
+        ('LOGOUT', 'Cierre de Sesion'),
         ('LOGIN_FALLIDO', 'Intento Fallido'),
         ('CREATE', 'Crear'),
         ('UPDATE', 'Actualizar'),
@@ -203,32 +240,61 @@ class AuditLog(models.Model):
         ('VIEW', 'Ver'),
         ('EXPORT', 'Exportar'),
         ('PRINT', 'Imprimir'),
+        ('MFA_SETUP', 'Configuracion MFA'),
+        ('MFA_VERIFY', 'Verificacion MFA'),
+        ('PASSWORD_CHANGE', 'Cambio de Password'),
+        ('ROLE_CHANGE', 'Cambio de Rol'),
+        ('PERMISSION_CHANGE', 'Cambio de Permisos'),
+        ('SESSION_INVALIDATE', 'Invalidacion de Sesion'),
+        ('API_KEY_CREATE', 'Creacion de API Key'),
+        ('SENSITIVE_ACCESS', 'Acceso a Datos Sensibles'),
     ]
-    
+    RESULTADO_CHOICES = [
+        ('SUCCESS', 'Exitoso'),
+        ('FAILED', 'Fallido'),
+    ]
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
     usuario = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True)
-    
+
     accion = models.CharField(max_length=20, choices=ACCION_CHOICES)
     modelo = models.CharField(max_length=100)
     objeto_id = models.CharField(max_length=100, blank=True)
     descripcion = models.TextField()
-    
+
     datos_anteriores = models.JSONField(null=True, blank=True)
     datos_nuevos = models.JSONField(null=True, blank=True)
-    
+
     ip_address = models.GenericIPAddressField(null=True)
     user_agent = models.TextField(blank=True)
-    
+    sesion_id = models.CharField(max_length=255, blank=True)
+    duracion_ms = models.IntegerField(null=True, blank=True)
+    resultado = models.CharField(max_length=10, choices=RESULTADO_CHOICES, default='SUCCESS')
+
     fecha = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         ordering = ['-fecha']
         indexes = [
             models.Index(fields=['negocio', 'fecha']),
             models.Index(fields=['usuario', 'accion']),
             models.Index(fields=['modelo', 'objeto_id']),
+            models.Index(fields=['resultado']),
         ]
+
+    def save(self, *args, **kwargs):
+        # Inmutable: solo permitir inserts, no updates
+        if self.pk:
+            try:
+                AuditLog.objects.get(pk=self.pk)
+                raise ValidationError("Los registros de auditoria son inmutables.")
+            except AuditLog.DoesNotExist:
+                pass
+        super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Los registros de auditoria no se pueden eliminar.")
 
 
 # =============================================================================
@@ -380,10 +446,10 @@ class AsientoContable(models.Model):
         totales = self.lineas.aggregate(d=Sum('debe'), h=Sum('haber'))
         self.total_debe = totales['d'] or 0
         self.total_haber = totales['h'] or 0
-        
-        self.clean() # Validar balance
-        
+
+        # Set estado before clean so validation can run
         self.estado = 'CONTABILIZADO'
+        self.clean()
         self.save()
         
         # Actualizar saldos de cuentas (opcional si se usa cálculo al vuelo)
@@ -615,13 +681,17 @@ class Cliente(models.Model):
     balance = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     
     cuenta_cobrar = models.ForeignKey(CuentaContable, on_delete=models.SET_NULL, null=True, blank=True)
-    
+
+    # GDPR / Proteccion de datos
+    consentimiento_datos = models.BooleanField(default=False)
+    fecha_consentimiento = models.DateTimeField(null=True, blank=True)
+
     activo = models.BooleanField(default=True)
     creado_en = models.DateTimeField(auto_now_add=True)
-    
+
     class Meta:
         unique_together = ['negocio', 'numero_documento']
-    
+
     def __str__(self):
         return f"{self.nombre} ({self.numero_documento})"
 
@@ -1627,3 +1697,244 @@ class TasaCambio(models.Model):
 
     def __str__(self):
         return f"{self.moneda_origen}/{self.moneda_destino}: {self.tasa} ({self.fecha})"
+
+
+# =============================================================================
+# SEGURIDAD EMPRESARIAL - MODELOS
+# =============================================================================
+
+class SesionActiva(models.Model):
+    """Control de sesiones concurrentes (max 3 por usuario)"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    usuario = models.ForeignKey(Usuario, on_delete=models.CASCADE, related_name='sesiones')
+    token_jti = models.CharField(max_length=255, unique=True, db_index=True)
+    ip_address = models.GenericIPAddressField(null=True)
+    user_agent = models.TextField(blank=True, default='')
+    creado_en = models.DateTimeField(auto_now_add=True)
+    ultimo_uso = models.DateTimeField(auto_now=True)
+    activa = models.BooleanField(default=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+        indexes = [
+            models.Index(fields=['usuario', 'activa']),
+        ]
+
+    def __str__(self):
+        return f"Sesion {self.usuario.username} ({self.ip_address})"
+
+
+class ApiKey(models.Model):
+    """API keys con scopes para integraciones externas"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='api_keys')
+    nombre = models.CharField(max_length=100)
+    key_hash = models.CharField(max_length=255, unique=True)
+    key_prefix = models.CharField(max_length=12)
+    scopes = models.JSONField(default=list, help_text="Ej: ['ventas:read', 'productos:read']")
+    activa = models.BooleanField(default=True)
+    ultimo_uso = models.DateTimeField(null=True, blank=True)
+    expira_en = models.DateTimeField(null=True, blank=True)
+    creado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"{self.nombre} ({self.key_prefix}...)"
+
+    @property
+    def esta_expirada(self):
+        if self.expira_en and self.expira_en < timezone.now():
+            return True
+        return False
+
+
+class IPBloqueada(models.Model):
+    """IPs bloqueadas automatica o manualmente"""
+    ip_address = models.GenericIPAddressField(unique=True)
+    razon = models.CharField(max_length=255)
+    intentos = models.IntegerField(default=0)
+    bloqueado_hasta = models.DateTimeField(null=True, blank=True)
+    permanente = models.BooleanField(default=False)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name_plural = "IPs Bloqueadas"
+
+    def __str__(self):
+        return f"{self.ip_address} - {self.razon}"
+
+    @property
+    def esta_bloqueada(self):
+        if self.permanente:
+            return True
+        if self.bloqueado_hasta and self.bloqueado_hasta > timezone.now():
+            return True
+        return False
+
+
+class AlertaSeguridad(models.Model):
+    """Alertas de seguridad en tiempo real"""
+    TIPO_CHOICES = [
+        ('LOGIN_FALLIDO', 'Intentos de login fallidos'),
+        ('CAMBIO_ROL', 'Cambio de rol administrativo'),
+        ('ELIMINACION_MASIVA', 'Eliminacion masiva de datos'),
+        ('ACCESO_FUERA_HORARIO', 'Acceso fuera de horario'),
+        ('IP_NUEVA', 'Login desde IP nueva'),
+        ('DESCUADRE', 'Descuadre de caja significativo'),
+        ('ANULACIONES', 'Exceso de anulaciones'),
+        ('DESCUENTO_EXCESIVO', 'Descuento excesivo aplicado'),
+        ('TRANSACCION_ALTA', 'Transaccion de monto alto'),
+        ('ANOMALIA', 'Anomalia detectada'),
+        ('CUENTA_BLOQUEADA', 'Cuenta bloqueada'),
+        ('IP_BLOQUEADA', 'IP bloqueada'),
+    ]
+    SEVERIDAD_CHOICES = [
+        ('BAJA', 'Baja'),
+        ('MEDIA', 'Media'),
+        ('ALTA', 'Alta'),
+        ('CRITICA', 'Critica'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='alertas_seguridad')
+    tipo = models.CharField(max_length=30, choices=TIPO_CHOICES)
+    severidad = models.CharField(max_length=10, choices=SEVERIDAD_CHOICES, default='MEDIA')
+    titulo = models.CharField(max_length=200)
+    descripcion = models.TextField()
+    usuario = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True)
+    ip_address = models.GenericIPAddressField(null=True, blank=True)
+    datos = models.JSONField(default=dict, blank=True)
+    leida = models.BooleanField(default=False)
+    resuelta = models.BooleanField(default=False)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+        indexes = [
+            models.Index(fields=['negocio', 'tipo', 'creado_en']),
+            models.Index(fields=['leida', 'resuelta']),
+        ]
+
+    def __str__(self):
+        return f"[{self.severidad}] {self.titulo}"
+
+
+class ConfirmacionTransaccion(models.Model):
+    """Doble confirmacion para transacciones de monto alto"""
+    ESTADO_CHOICES = [
+        ('PENDIENTE', 'Pendiente'),
+        ('APROBADA', 'Aprobada'),
+        ('RECHAZADA', 'Rechazada'),
+        ('EXPIRADA', 'Expirada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    tipo = models.CharField(max_length=50)
+    objeto_id = models.CharField(max_length=100)
+    monto = models.DecimalField(max_digits=15, decimal_places=2)
+    solicitado_por = models.ForeignKey(
+        Usuario, on_delete=models.CASCADE, related_name='confirmaciones_solicitadas'
+    )
+    confirmado_por = models.ForeignKey(
+        Usuario, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='confirmaciones_aprobadas'
+    )
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='PENDIENTE')
+    expira_en = models.DateTimeField()
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"{self.tipo} ${self.monto} - {self.estado}"
+
+    @property
+    def esta_expirada(self):
+        return timezone.now() > self.expira_en and self.estado == 'PENDIENTE'
+
+
+class TokenPago(models.Model):
+    """Tokenizacion de pagos - PCI DSS nivel 4"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE)
+    cliente = models.ForeignKey('Cliente', on_delete=models.CASCADE, related_name='tokens_pago')
+    token = models.CharField(max_length=255, unique=True)
+    ultimos_4 = models.CharField(max_length=4)
+    tipo_tarjeta = models.CharField(max_length=20)
+    expiracion_mes = models.IntegerField()
+    expiracion_ano = models.IntegerField()
+    activo = models.BooleanField(default=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"{self.tipo_tarjeta} ****{self.ultimos_4}"
+
+
+class LicenciaSistema(models.Model):
+    """Licencias HMAC-SHA256 vinculadas a negocio"""
+    TIPO_CHOICES = [
+        ('TRIAL', 'Prueba'),
+        ('BASICO', 'Basico'),
+        ('PROFESIONAL', 'Profesional'),
+        ('ENTERPRISE', 'Enterprise'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='licencias')
+    clave_licencia = models.CharField(max_length=512, unique=True)
+    tipo = models.CharField(max_length=20, choices=TIPO_CHOICES)
+    max_usuarios = models.IntegerField(default=5)
+    max_sucursales = models.IntegerField(default=1)
+    modulos = models.JSONField(default=list)
+    fecha_inicio = models.DateField()
+    fecha_fin = models.DateField()
+    firma_hmac = models.CharField(max_length=128)
+    ultima_verificacion = models.DateTimeField(null=True, blank=True)
+    activa = models.BooleanField(default=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"{self.negocio} - {self.tipo} (hasta {self.fecha_fin})"
+
+
+class BackupRegistro(models.Model):
+    """Registro de backups con verificacion de integridad"""
+    TIPO_CHOICES = [
+        ('DIARIO', 'Diario'),
+        ('MIGRACION', 'Pre-migracion'),
+        ('MANUAL', 'Manual'),
+    ]
+    ESTADO_CHOICES = [
+        ('EN_PROGRESO', 'En progreso'),
+        ('COMPLETADO', 'Completado'),
+        ('FALLIDO', 'Fallido'),
+        ('VERIFICADO', 'Verificado'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tipo = models.CharField(max_length=15, choices=TIPO_CHOICES)
+    archivo = models.CharField(max_length=500)
+    tamano_bytes = models.BigIntegerField(default=0)
+    checksum_sha256 = models.CharField(max_length=64, blank=True)
+    encriptado = models.BooleanField(default=True)
+    estado = models.CharField(max_length=15, choices=ESTADO_CHOICES, default='EN_PROGRESO')
+    test_restauracion = models.DateTimeField(null=True, blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    expira_en = models.DateTimeField()
+
+    class Meta:
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return f"Backup {self.tipo} - {self.creado_en.strftime('%Y-%m-%d')}"

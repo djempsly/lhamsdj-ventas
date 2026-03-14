@@ -27,7 +27,7 @@ router.register(r'proveedores', views.ProveedorViewSet, basename='proveedor')
 router.register(r'ventas', views.VentaViewSet, basename='venta')
 router.register(r'compras', views.CompraViewSet, basename='compra')
 
-# --- Cotizaciones & Órdenes (Fase 3A) ---
+# --- Cotizaciones & Ordenes (Fase 3A) ---
 router.register(r'cotizaciones', views.CotizacionViewSet, basename='cotizacion')
 router.register(r'ordenes-compra', views.OrdenCompraViewSet, basename='orden-compra')
 
@@ -48,7 +48,7 @@ router.register(r'reportes-fiscales', views.ReporteFiscalViewSet, basename='repo
 # --- AI ---
 router.register(r'analisis-ai', views.AnalisisAIViewSet, basename='analisis-ai')
 
-# --- HR / Nómina (Fase 5A) ---
+# --- HR / Nomina (Fase 5A) ---
 router.register(r'departamentos', views.DepartamentoViewSet, basename='departamento')
 router.register(r'empleados', views.EmpleadoViewSet, basename='empleado')
 router.register(r'nominas', views.NominaViewSet, basename='nomina')
@@ -65,9 +65,32 @@ router.register(r'tasas-cambio', views.TasaCambioViewSet, basename='tasa-cambio'
 # --- Exportaciones (Fase 3D) ---
 router.register(r'export', views.ExportViewSet, basename='export')
 
+# --- Seguridad ---
+router.register(r'seguridad/api-keys', views.ApiKeyViewSet, basename='api-key')
+router.register(r'seguridad/alertas', views.AlertaSeguridadViewSet, basename='alerta-seguridad')
+router.register(r'seguridad/audit-log', views.AuditLogViewSet, basename='audit-log')
+router.register(r'seguridad/confirmaciones', views.ConfirmacionTransaccionViewSet, basename='confirmacion')
+
 urlpatterns = [
+    # Auth
     path('auth/login/', views.CustomLoginView.as_view(), name='login'),
+    path('auth/mfa/verify/', views.MFAVerifyView.as_view(), name='mfa-verify'),
     path('auth/refresh/', views.CookieTokenRefreshView.as_view(), name='token_refresh'),
     path('auth/logout/', views.LogoutView.as_view(), name='logout'),
+    path('auth/logout-all/', views.LogoutAllView.as_view(), name='logout-all'),
+    path('auth/change-password/', views.ChangePasswordView.as_view(), name='change-password'),
+
+    # MFA/2FA
+    path('auth/2fa/setup/', views.Setup2FAView.as_view(), name='2fa-setup'),
+    path('auth/2fa/confirm/', views.Confirm2FAView.as_view(), name='2fa-confirm'),
+    path('auth/2fa/disable/', views.Disable2FAView.as_view(), name='2fa-disable'),
+
+    # Sessions
+    path('auth/sessions/', views.SessionListView.as_view(), name='sessions'),
+
+    # License
+    path('licencia/verificar/', views.LicenciaVerificarView.as_view(), name='licencia-verificar'),
+
+    # Router URLs
     path('', include(router.urls)),
 ]

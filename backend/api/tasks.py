@@ -4,15 +4,17 @@ import logging
 logger = logging.getLogger('api')
 
 
+# =============================================================================
+# FISCAL TASKS (existing)
+# =============================================================================
+
 @shared_task(bind=True, max_retries=3, default_retry_delay=60)
 def enviar_ecf_async(self, venta_id):
-    """Envía e-CF a DGII en background."""
+    """Envia e-CF a DGII en background."""
     from api.models import Venta, FacturaElectronica
     from api.utils.ecf_generator import ECFGenerator
     from api.utils.xml_signer import sign_ecf_xml
     from api.utils.dgii_api import DGIIClient
-    import random
-    import string
 
     try:
         venta = Venta.objects.select_related('negocio', 'cliente').get(id=venta_id)
@@ -34,13 +36,16 @@ def enviar_ecf_async(self, venta_id):
         )
         resultado = cliente.enviar_ecf(xml_firmado)
 
-        factura, _ = FacturaElectronica.objects.update_or_create(
+        FacturaElectronica.objects.update_or_create(
             venta=venta,
             defaults={
                 'track_id': resultado.get('trackId', ''),
                 'xml_firmado': xml_firmado,
                 'respuesta_dgii': resultado,
-                'qr_code_url': f"https://dgii.gov.do/ecf?rnc={negocio.identificacion_fiscal}&encf={venta.ncf}&sc={venta.codigo_seguridad_dgii}",
+                'qr_code_url': (
+                    f"https://dgii.gov.do/ecf?rnc={negocio.identificacion_fiscal}"
+                    f"&encf={venta.ncf}&sc={venta.codigo_seguridad_dgii}"
+                ),
             }
         )
 
@@ -52,7 +57,7 @@ def enviar_ecf_async(self, venta_id):
             venta.estado_fiscal = 'ENVIADO'
         venta.save(update_fields=['estado_fiscal'])
 
-        logger.info('e-CF enviado exitosamente para venta %s: %s', venta.numero, resultado.get('estado'))
+        logger.info('e-CF enviado para venta %s: %s', venta.numero, resultado.get('estado'))
         return {'status': 'ok', 'track_id': resultado.get('trackId')}
 
     except Exception as exc:
@@ -64,9 +69,27 @@ def enviar_ecf_async(self, venta_id):
         raise self.retry(exc=exc)
 
 
+@shared_task
+def reintentar_ecf_contingencia():
+    """Reintenta envio de e-CF en contingencia."""
+    from api.models import Venta
+
+    ventas = Venta.objects.filter(
+        estado_fiscal='EN_CONTINGENCIA'
+    ).values_list('id', flat=True)[:20]
+    for venta_id in ventas:
+        enviar_ecf_async.delay(str(venta_id))
+
+    logger.info('Reintentando %d e-CF en contingencia', len(ventas))
+
+
+# =============================================================================
+# AI TASKS (existing)
+# =============================================================================
+
 @shared_task(bind=True, max_retries=2, default_retry_delay=30)
 def generar_analisis_ai_async(self, negocio_id, tipo, dias=30):
-    """Genera análisis AI en background."""
+    """Genera analisis AI en background."""
     from api.models import Negocio
     from api.utils.ai_engine import analizar_ventas, detectar_anomalias, generar_recomendaciones
 
@@ -80,24 +103,12 @@ def generar_analisis_ai_async(self, negocio_id, tipo, dias=30):
         else:
             analizar_ventas(negocio, dias=dias)
 
-        logger.info('Análisis AI tipo %s generado para negocio %s', tipo, negocio.nombre_comercial)
+        logger.info('Analisis AI tipo %s generado para negocio %s', tipo, negocio.nombre_comercial)
         return {'status': 'ok', 'tipo': tipo}
 
     except Exception as exc:
-        logger.error('Error generando análisis AI: %s', exc)
+        logger.error('Error generando analisis AI: %s', exc)
         raise self.retry(exc=exc)
-
-
-@shared_task
-def reintentar_ecf_contingencia():
-    """Tarea programada: reintenta envío de e-CF en contingencia."""
-    from api.models import Venta
-
-    ventas = Venta.objects.filter(estado_fiscal='EN_CONTINGENCIA').values_list('id', flat=True)[:20]
-    for venta_id in ventas:
-        enviar_ecf_async.delay(str(venta_id))
-
-    logger.info('Reintentando %d e-CF en contingencia', len(ventas))
 
 
 @shared_task
@@ -135,3 +146,118 @@ def exportar_reporte_excel_async(negocio_id, tipo_reporte, parametros):
     except Exception as exc:
         logger.error('Error exportando reporte: %s', exc)
         raise
+
+
+# =============================================================================
+# SECURITY TASKS
+# =============================================================================
+
+@shared_task
+def backup_diario():
+    """Backup automatico diario de la base de datos."""
+    from api.security.backup_manager import create_database_backup
+    try:
+        result = create_database_backup(tipo='DIARIO')
+        logger.info('Backup diario completado: %s', result.get('archivo'))
+        return result
+    except Exception as exc:
+        logger.error('Error en backup diario: %s', exc)
+        raise
+
+
+@shared_task
+def limpiar_sesiones_expiradas():
+    """Limpiar sesiones inactivas (>7 dias sin uso)."""
+    from api.models import SesionActiva
+    from django.utils import timezone
+    from datetime import timedelta
+
+    cutoff = timezone.now() - timedelta(days=7)
+    count = SesionActiva.objects.filter(
+        ultimo_uso__lt=cutoff
+    ).update(activa=False)
+
+    if count:
+        logger.info('Limpiadas %d sesiones expiradas', count)
+    return {'cleaned': count}
+
+
+@shared_task
+def detectar_anomalias_todos():
+    """Detectar anomalias en todos los negocios activos."""
+    from api.models import Negocio, AlertaSeguridad
+    from api.security.anomaly_detector import run_daily_anomaly_scan
+
+    negocios = Negocio.objects.filter(estado_licencia='ACTIVA')
+    total_alerts = 0
+
+    for negocio in negocios:
+        try:
+            alerts = run_daily_anomaly_scan(negocio)
+            for alert_data in alerts:
+                AlertaSeguridad.objects.create(
+                    negocio=negocio,
+                    tipo=alert_data.get('tipo', 'ANOMALIA'),
+                    severidad='ALTA',
+                    titulo=alert_data.get('tipo', 'Anomalia detectada'),
+                    descripcion=alert_data.get('descripcion', ''),
+                    datos=alert_data,
+                )
+                total_alerts += 1
+        except Exception as e:
+            logger.error('Error detectando anomalias para %s: %s', negocio.nombre_comercial, e)
+
+    logger.info('Deteccion de anomalias completada: %d alertas generadas', total_alerts)
+    return {'alerts': total_alerts}
+
+
+@shared_task
+def verificar_licencias():
+    """Verificar validez de todas las licencias activas."""
+    from api.models import LicenciaSistema, Negocio
+    from api.security.license_manager import verify_license
+    from django.utils import timezone
+
+    licencias = LicenciaSistema.objects.filter(activa=True)
+    expired = 0
+
+    for licencia in licencias:
+        is_valid, reason = verify_license(licencia)
+        licencia.ultima_verificacion = timezone.now()
+
+        if not is_valid:
+            licencia.activa = False
+            expired += 1
+            logger.warning(
+                'Licencia invalidada para negocio %s: %s',
+                licencia.negocio_id, reason
+            )
+
+        licencia.save(update_fields=['ultima_verificacion', 'activa'])
+
+    logger.info('Verificacion de licencias: %d expiradas de %d', expired, licencias.count())
+    return {'total': licencias.count(), 'expired': expired}
+
+
+@shared_task
+def limpiar_backups_expirados():
+    """Eliminar backups que exceden la retencion de 30 dias."""
+    from api.security.backup_manager import cleanup_expired_backups
+    count = cleanup_expired_backups()
+    return {'cleaned': count}
+
+
+@shared_task
+def limpiar_ips_expiradas():
+    """Limpiar IPs bloqueadas cuyo tiempo de bloqueo ya paso."""
+    from api.models import IPBloqueada
+    from django.utils import timezone
+
+    count = IPBloqueada.objects.filter(
+        permanente=False,
+        bloqueado_hasta__lt=timezone.now(),
+    ).delete()[0]
+
+    if count:
+        logger.info('Limpiadas %d IPs bloqueadas expiradas', count)
+    return {'cleaned': count}

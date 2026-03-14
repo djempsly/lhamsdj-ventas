@@ -1,4 +1,6 @@
+from decimal import Decimal
 from rest_framework import serializers
+from django.contrib.auth.password_validation import validate_password
 from .models import (
     Pais, Moneda, Negocio, Sucursal, Usuario, AuditLog,
     CuentaContable, PeriodoContable, AsientoContable, LineaAsiento,
@@ -10,6 +12,8 @@ from .models import (
     CuentaPorCobrar, CuentaPorPagar, Pago,
     Departamento, Empleado, Nomina, DetalleNomina, Vacacion,
     EtapaCRM, Oportunidad, ActividadCRM, TasaCambio,
+    SesionActiva, ApiKey, IPBloqueada, AlertaSeguridad,
+    ConfirmacionTransaccion, TokenPago, LicenciaSistema, BackupRegistro,
 )
 
 
@@ -566,3 +570,188 @@ class TasaCambioSerializer(serializers.ModelSerializer):
     class Meta:
         model = TasaCambio
         fields = ['id', 'moneda_origen', 'moneda_destino', 'tasa', 'fecha', 'fuente']
+
+
+# =============================================================================
+# SEGURIDAD EMPRESARIAL
+# =============================================================================
+
+class ChangePasswordSerializer(serializers.Serializer):
+    """Cambio de contrasena con validacion de politicas."""
+    old_password = serializers.CharField(required=True)
+    new_password = serializers.CharField(required=True)
+
+    def validate_new_password(self, value):
+        validate_password(value)
+        return value
+
+
+class Setup2FASerializer(serializers.Serializer):
+    """Respuesta de configuracion 2FA."""
+    secret = serializers.CharField(read_only=True)
+    qr_code = serializers.CharField(read_only=True)
+    uri = serializers.CharField(read_only=True)
+
+
+class Verify2FASerializer(serializers.Serializer):
+    """Verificacion de token TOTP."""
+    token = serializers.CharField(required=True, min_length=6, max_length=6)
+
+
+class MFALoginSerializer(serializers.Serializer):
+    """Segundo paso del login con MFA."""
+    mfa_token = serializers.CharField(required=True, min_length=6, max_length=6)
+    session_token = serializers.CharField(required=True)
+
+
+class SesionActivaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = SesionActiva
+        fields = ['id', 'ip_address', 'user_agent', 'creado_en', 'ultimo_uso']
+        read_only_fields = fields
+
+
+class ApiKeyCreateSerializer(serializers.Serializer):
+    """Creacion de API key."""
+    nombre = serializers.CharField(max_length=100)
+    scopes = serializers.ListField(child=serializers.CharField(), required=True)
+    expira_en = serializers.DateTimeField(required=False, allow_null=True)
+
+
+class ApiKeySerializer(serializers.ModelSerializer):
+    creado_por_nombre = serializers.CharField(source='creado_por.get_full_name', read_only=True)
+
+    class Meta:
+        model = ApiKey
+        fields = [
+            'id', 'nombre', 'key_prefix', 'scopes', 'activa',
+            'ultimo_uso', 'expira_en', 'creado_por', 'creado_por_nombre', 'creado_en',
+        ]
+        read_only_fields = fields
+
+
+class IPBloqueadaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = IPBloqueada
+        fields = ['id', 'ip_address', 'razon', 'intentos', 'bloqueado_hasta',
+                  'permanente', 'creado_en']
+        read_only_fields = ['intentos', 'creado_en']
+
+
+class AlertaSeguridadSerializer(serializers.ModelSerializer):
+    usuario_nombre = serializers.CharField(source='usuario.get_full_name', read_only=True)
+
+    class Meta:
+        model = AlertaSeguridad
+        fields = [
+            'id', 'tipo', 'severidad', 'titulo', 'descripcion',
+            'usuario', 'usuario_nombre', 'ip_address', 'datos',
+            'leida', 'resuelta', 'creado_en',
+        ]
+        read_only_fields = ['id', 'tipo', 'severidad', 'titulo', 'descripcion',
+                            'usuario', 'ip_address', 'datos', 'creado_en']
+
+
+class ConfirmacionTransaccionSerializer(serializers.ModelSerializer):
+    solicitado_por_nombre = serializers.CharField(
+        source='solicitado_por.get_full_name', read_only=True
+    )
+    confirmado_por_nombre = serializers.CharField(
+        source='confirmado_por.get_full_name', read_only=True
+    )
+
+    class Meta:
+        model = ConfirmacionTransaccion
+        fields = [
+            'id', 'tipo', 'objeto_id', 'monto',
+            'solicitado_por', 'solicitado_por_nombre',
+            'confirmado_por', 'confirmado_por_nombre',
+            'estado', 'expira_en', 'creado_en',
+        ]
+        read_only_fields = fields
+
+
+class AuditLogSerializer(serializers.ModelSerializer):
+    usuario_nombre = serializers.CharField(source='usuario.get_full_name', read_only=True)
+
+    class Meta:
+        model = AuditLog
+        fields = [
+            'id', 'usuario', 'usuario_nombre', 'accion', 'modelo',
+            'objeto_id', 'descripcion', 'datos_anteriores', 'datos_nuevos',
+            'ip_address', 'user_agent', 'sesion_id', 'duracion_ms',
+            'resultado', 'fecha',
+        ]
+        read_only_fields = fields
+
+
+class LicenciaSistemaSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = LicenciaSistema
+        fields = [
+            'id', 'clave_licencia', 'tipo', 'max_usuarios', 'max_sucursales',
+            'modulos', 'fecha_inicio', 'fecha_fin', 'ultima_verificacion',
+            'activa', 'creado_en',
+        ]
+        read_only_fields = ['clave_licencia', 'firma_hmac', 'ultima_verificacion', 'creado_en']
+
+
+class BackupRegistroSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = BackupRegistro
+        fields = [
+            'id', 'tipo', 'archivo', 'tamano_bytes', 'checksum_sha256',
+            'encriptado', 'estado', 'test_restauracion', 'creado_en', 'expira_en',
+        ]
+        read_only_fields = fields
+
+
+class DetalleVentaSecureWriteSerializer(serializers.Serializer):
+    """Detalle de venta con validacion server-side de precios."""
+    producto = serializers.UUIDField()
+    cantidad = serializers.DecimalField(max_digits=12, decimal_places=2)
+    precio_unitario = serializers.DecimalField(max_digits=12, decimal_places=2)
+    descuento = serializers.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    def validate(self, attrs):
+        from .models import Producto
+        try:
+            producto = Producto.objects.get(pk=attrs['producto'])
+        except Producto.DoesNotExist:
+            raise serializers.ValidationError({'producto': 'Producto no encontrado.'})
+
+        # Server-side price validation (anti-MITM)
+        precio = attrs['precio_unitario']
+        if precio != producto.precio_venta and precio != producto.precio_mayorista:
+            request = self.context.get('request')
+            if request and not request.user.puede_editar_precios:
+                raise serializers.ValidationError({
+                    'precio_unitario': (
+                        f'Precio ${precio} no coincide con precio del producto '
+                        f'${producto.precio_venta}. No tiene permiso para editar precios.'
+                    )
+                })
+
+        # Validate discount limits by role
+        descuento_pct = Decimal('0')
+        subtotal = attrs['cantidad'] * precio
+        if subtotal > 0 and attrs.get('descuento', 0) > 0:
+            descuento_pct = (attrs['descuento'] / subtotal) * 100
+
+        if descuento_pct > 0:
+            request = self.context.get('request')
+            if request:
+                from api.security.anomaly_detector import get_max_discount_for_role
+                max_discount = get_max_discount_for_role(request.user.rol)
+                user_override = request.user.max_descuento
+                if user_override is not None:
+                    max_discount = user_override
+                if descuento_pct > max_discount:
+                    raise serializers.ValidationError({
+                        'descuento': (
+                            f'Descuento de {descuento_pct:.1f}% excede el limite '
+                            f'de {max_discount}% para su rol.'
+                        )
+                    })
+
+        return attrs

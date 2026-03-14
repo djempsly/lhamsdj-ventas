@@ -30,6 +30,8 @@ from .models import (
     CuentaPorCobrar, CuentaPorPagar, Pago,
     Departamento, Empleado, Nomina, DetalleNomina, Vacacion,
     EtapaCRM, Oportunidad, ActividadCRM, TasaCambio,
+    SesionActiva, ApiKey, IPBloqueada, AlertaSeguridad,
+    ConfirmacionTransaccion, LicenciaSistema,
 )
 from .serializers import (
     PaisSerializer, MonedaSerializer, NegocioSerializer, SucursalSerializer,
@@ -43,6 +45,11 @@ from .serializers import (
     CuentaPorCobrarSerializer, CuentaPorPagarSerializer, PagoSerializer,
     DepartamentoSerializer, EmpleadoSerializer, NominaSerializer, DetalleNominaSerializer, VacacionSerializer,
     EtapaCRMSerializer, OportunidadSerializer, ActividadCRMSerializer, TasaCambioSerializer,
+    ChangePasswordSerializer, Setup2FASerializer, Verify2FASerializer, MFALoginSerializer,
+    SesionActivaSerializer, ApiKeyCreateSerializer, ApiKeySerializer,
+    IPBloqueadaSerializer, AlertaSeguridadSerializer,
+    ConfirmacionTransaccionSerializer, AuditLogSerializer,
+    LicenciaSistemaSerializer, BackupRegistroSerializer,
 )
 from .permissions import (
     IsNegocioMember, CanEmitECF, CanViewReports,
@@ -50,6 +57,8 @@ from .permissions import (
     CanManageAccounting, CanManageHR, CanManagePurchases,
     CanManageBanking, CanApprovePurchaseOrders, CanManageCRM,
     IsAdminRole, IsManagementRole, IsSalesRole, ReadOnly,
+    CanManageApiKeys, CanViewAuditLogs, CanManageSecurity,
+    RequiresDifferentApprover,
 )
 from .utils.ecf_generator import ECFGenerator
 from .utils.xml_signer import sign_ecf_xml
@@ -98,7 +107,7 @@ def _set_auth_cookies(response, access_token, refresh_token):
         'refresh_token',
         str(refresh_token),
         max_age=int(settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
-        path='/api/auth/',
+        path='/api/',
         **base,
     )
     return response
@@ -108,7 +117,7 @@ def _clear_auth_cookies(response):
     """Remove auth cookies."""
     domain = settings.COOKIE_DOMAIN
     response.delete_cookie('access_token', path='/', domain=domain)
-    response.delete_cookie('refresh_token', path='/api/auth/', domain=domain)
+    response.delete_cookie('refresh_token', path='/api/', domain=domain)
     return response
 
 
@@ -117,7 +126,7 @@ def _clear_auth_cookies(response):
 # =============================================================================
 
 class LoginThrottle(AnonRateThrottle):
-    rate = '10/minute'
+    rate = '5/minute'
 
 
 class CustomLoginSerializer(TokenObtainPairSerializer):
@@ -133,6 +142,9 @@ class CustomLoginSerializer(TokenObtainPairSerializer):
             'email': user.email,
             'nombre': user.get_full_name() or user.username,
             'rol': user.rol,
+            'two_factor_enabled': user.two_factor_enabled,
+            'forzar_cambio_password': user.forzar_cambio_password,
+            'password_expirado': user.password_expirado,
             'permisos': {
                 'puede_crear_productos': user.puede_crear_productos,
                 'puede_editar_precios': user.puede_editar_precios,
@@ -157,11 +169,25 @@ class CustomLoginView(TokenObtainPairView):
 
     def post(self, request, *args, **kwargs):
         username = request.data.get('username', '')
+        client_ip = _get_client_ip(request)
+        max_attempts = getattr(settings, 'MAX_LOGIN_ATTEMPTS', 5)
+        lockout_min = getattr(settings, 'LOCKOUT_DURATION_MINUTES', 15)
+
+        # --- IP blacklist check ---
+        try:
+            blocked_ip = IPBloqueada.objects.get(ip_address=client_ip)
+            if blocked_ip.esta_bloqueada:
+                return Response(
+                    {'detail': 'Acceso denegado desde esta IP.'},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+        except IPBloqueada.DoesNotExist:
+            pass
 
         # --- Brute-force protection ---
         try:
             user = Usuario.objects.get(username=username)
-            if user.cuenta_bloqueada_hasta and user.cuenta_bloqueada_hasta > timezone.now():
+            if user.esta_bloqueado:
                 remaining = max(1, (user.cuenta_bloqueada_hasta - timezone.now()).seconds // 60)
                 logger.warning('Blocked login attempt for locked account: %s', username)
                 return Response(
@@ -179,10 +205,24 @@ class CustomLoginView(TokenObtainPairView):
                 user = Usuario.objects.get(username=username)
                 user.intentos_fallidos += 1
                 update_fields = ['intentos_fallidos']
-                if user.intentos_fallidos >= 5:
-                    user.cuenta_bloqueada_hasta = timezone.now() + timedelta(minutes=15)
+                if user.intentos_fallidos >= max_attempts:
+                    user.cuenta_bloqueada_hasta = timezone.now() + timedelta(minutes=lockout_min)
                     update_fields.append('cuenta_bloqueada_hasta')
-                    logger.warning('Account locked after %d failed attempts: %s', user.intentos_fallidos, username)
+                    logger.warning(
+                        'Account locked after %d failed attempts: %s',
+                        user.intentos_fallidos, username
+                    )
+                    # Create security alert
+                    if user.negocio:
+                        AlertaSeguridad.objects.create(
+                            negocio=user.negocio,
+                            tipo='CUENTA_BLOQUEADA',
+                            severidad='ALTA',
+                            titulo=f'Cuenta bloqueada: {username}',
+                            descripcion=f'{user.intentos_fallidos} intentos fallidos desde {client_ip}',
+                            usuario=user,
+                            ip_address=client_ip,
+                        )
                 user.save(update_fields=update_fields)
 
                 if user.negocio:
@@ -193,11 +233,15 @@ class CustomLoginView(TokenObtainPairView):
                         modelo='Usuario',
                         objeto_id=str(user.id),
                         descripcion=f'Login fallido (intento {user.intentos_fallidos})',
-                        ip_address=_get_client_ip(request),
+                        ip_address=client_ip,
                         user_agent=request.META.get('HTTP_USER_AGENT', '')[:500],
+                        resultado='FAILED',
                     )
             except Usuario.DoesNotExist:
                 pass
+
+            # Auto-blacklist IP after 10 failed attempts across all users
+            self._check_ip_blacklist(client_ip)
 
             return Response(
                 {'detail': 'Credenciales invalidas'},
@@ -205,12 +249,47 @@ class CustomLoginView(TokenObtainPairView):
             )
 
         if response.status_code == 200:
-            # Reset failed attempts on success
             try:
                 user = Usuario.objects.get(username=username)
+
+                # Check if 2FA is required
+                if user.two_factor_enabled:
+                    # Don't set auth cookies yet - require MFA verification
+                    access_token = response.data.get('access')
+                    refresh_token = response.data.get('refresh')
+
+                    # Store tokens temporarily in cache for MFA verification
+                    from django.core.cache import cache
+                    import secrets
+                    mfa_session = secrets.token_urlsafe(32)
+                    cache.set(
+                        f'mfa_pending:{mfa_session}',
+                        {
+                            'access': access_token,
+                            'refresh': refresh_token,
+                            'user_id': str(user.id),
+                        },
+                        timeout=300,  # 5 minutes to complete MFA
+                    )
+
+                    return Response({
+                        'requires_mfa': True,
+                        'session_token': mfa_session,
+                        'usuario': response.data.get('usuario'),
+                    })
+
+                # Reset failed attempts on success
                 user.intentos_fallidos = 0
                 user.cuenta_bloqueada_hasta = None
                 user.save(update_fields=['intentos_fallidos', 'cuenta_bloqueada_hasta'])
+
+                # Register session
+                access_token = response.data.get('access')
+                refresh_token = response.data.get('refresh')
+                self._register_session(user, access_token, client_ip, request)
+
+                # Detect new IP
+                self._check_new_ip(user, client_ip, request)
 
                 if user.negocio:
                     AuditLog.objects.create(
@@ -219,27 +298,181 @@ class CustomLoginView(TokenObtainPairView):
                         accion='LOGIN',
                         modelo='Usuario',
                         objeto_id=str(user.id),
-                        descripcion=f'Login exitoso desde {_get_client_ip(request)}',
-                        ip_address=_get_client_ip(request),
+                        descripcion=f'Login exitoso desde {client_ip}',
+                        ip_address=client_ip,
                         user_agent=request.META.get('HTTP_USER_AGENT', '')[:500],
                     )
+
+                # Set httpOnly cookies
+                _set_auth_cookies(response, access_token, refresh_token)
+
+                # Remove raw tokens from response body
+                response.data.pop('access', None)
+                response.data.pop('refresh', None)
+
             except Usuario.DoesNotExist:
                 pass
 
-            # Set httpOnly cookies
-            access_token = response.data.get('access')
-            refresh_token = response.data.get('refresh')
-            _set_auth_cookies(response, access_token, refresh_token)
+        return response
 
-            # Remove raw tokens from response body
-            response.data.pop('access', None)
-            response.data.pop('refresh', None)
+    def _register_session(self, user, access_token, ip, request):
+        """Register session and enforce max concurrent sessions."""
+        try:
+            from rest_framework_simplejwt.tokens import AccessToken
+            token = AccessToken(access_token)
+            jti = token.get('jti', '')
+            if jti:
+                from api.security.session_manager import register_session
+                register_session(
+                    user, jti, ip,
+                    request.META.get('HTTP_USER_AGENT', '')
+                )
+        except Exception as e:
+            logger.error('Error registering session: %s', e)
 
+    def _check_new_ip(self, user, ip, request):
+        """Alert on login from unknown IP."""
+        if not user.negocio or not ip:
+            return
+        known_ips = user.ips_conocidas or []
+        if ip not in known_ips:
+            if known_ips:  # Only alert if user has established IPs
+                AlertaSeguridad.objects.create(
+                    negocio=user.negocio,
+                    tipo='IP_NUEVA',
+                    severidad='MEDIA',
+                    titulo=f'Login desde IP nueva: {user.username}',
+                    descripcion=f'IP {ip} no esta en las IPs conocidas del usuario',
+                    usuario=user,
+                    ip_address=ip,
+                )
+            # Add IP to known list
+            known_ips.append(ip)
+            user.ips_conocidas = known_ips[-20:]  # Keep last 20
+            user.save(update_fields=['ips_conocidas'])
+
+    def _check_ip_blacklist(self, ip):
+        """Auto-blacklist IP after excessive failed login attempts."""
+        from django.core.cache import cache
+        cache_key = f'login_fail:{ip}'
+        attempts = cache.get(cache_key, 0) + 1
+        cache.set(cache_key, attempts, timeout=3600)
+
+        if attempts >= 10:
+            IPBloqueada.objects.update_or_create(
+                ip_address=ip,
+                defaults={
+                    'razon': f'Auto-bloqueada: {attempts} intentos fallidos en 1 hora',
+                    'intentos': attempts,
+                    'bloqueado_hasta': timezone.now() + timedelta(hours=1),
+                    'permanente': False,
+                }
+            )
+            logger.warning('IP auto-blacklisted: %s (%d attempts)', ip, attempts)
+
+
+class MFAVerifyView(APIView):
+    """Verify MFA token and complete login."""
+    permission_classes = [AllowAny]
+    throttle_classes = [LoginThrottle]
+
+    def post(self, request):
+        session_token = request.data.get('session_token', '')
+        mfa_token = request.data.get('mfa_token', '')
+
+        if not session_token or not mfa_token:
+            return Response(
+                {'detail': 'session_token y mfa_token son requeridos'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from django.core.cache import cache
+        pending = cache.get(f'mfa_pending:{session_token}')
+        if not pending:
+            return Response(
+                {'detail': 'Sesion MFA expirada. Inicie sesion nuevamente.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        try:
+            user = Usuario.objects.get(id=pending['user_id'])
+        except Usuario.DoesNotExist:
+            return Response(
+                {'detail': 'Usuario no encontrado'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        # Verify TOTP or backup code
+        from api.security.totp import verify_totp, verify_backup_code
+        totp_valid = verify_totp(user.two_factor_secret, mfa_token)
+
+        if not totp_valid:
+            # Try backup code
+            idx = verify_backup_code(mfa_token, user.backup_codes or [])
+            if idx is not None:
+                # Consume the backup code (one-time use)
+                codes = list(user.backup_codes)
+                codes.pop(idx)
+                user.backup_codes = codes
+                user.save(update_fields=['backup_codes'])
+            else:
+                return Response(
+                    {'detail': 'Codigo MFA invalido'},
+                    status=status.HTTP_401_UNAUTHORIZED,
+                )
+
+        # Clear pending MFA session
+        cache.delete(f'mfa_pending:{session_token}')
+
+        # Reset failed attempts
+        user.intentos_fallidos = 0
+        user.cuenta_bloqueada_hasta = None
+        user.save(update_fields=['intentos_fallidos', 'cuenta_bloqueada_hasta'])
+
+        # Register session
+        client_ip = _get_client_ip(request)
+        try:
+            from rest_framework_simplejwt.tokens import AccessToken
+            token = AccessToken(pending['access'])
+            jti = token.get('jti', '')
+            if jti:
+                from api.security.session_manager import register_session
+                register_session(
+                    user, jti, client_ip,
+                    request.META.get('HTTP_USER_AGENT', '')
+                )
+        except Exception:
+            pass
+
+        if user.negocio:
+            AuditLog.objects.create(
+                negocio=user.negocio,
+                usuario=user,
+                accion='MFA_VERIFY',
+                modelo='Usuario',
+                objeto_id=str(user.id),
+                descripcion=f'MFA verificado exitosamente desde {client_ip}',
+                ip_address=client_ip,
+            )
+
+        # Set auth cookies
+        response = Response({
+            'detail': 'MFA verificado',
+            'usuario': {
+                'id': str(user.id),
+                'username': user.username,
+                'nombre': user.get_full_name() or user.username,
+                'rol': user.rol,
+                'forzar_cambio_password': user.forzar_cambio_password,
+                'password_expirado': user.password_expirado,
+            },
+        })
+        _set_auth_cookies(response, pending['access'], pending['refresh'])
         return response
 
 
 class CookieTokenRefreshView(APIView):
-    """Refresh access token using the httpOnly refresh cookie."""
+    """Refresh access token using the httpOnly refresh cookie (single-use rotation)."""
     permission_classes = [AllowAny]
     throttle_classes = [LoginThrottle]
 
@@ -262,14 +495,14 @@ class CookieTokenRefreshView(APIView):
                 **base,
             )
 
-            # Rotate refresh token
+            # Rotate refresh token (single-use)
             if settings.SIMPLE_JWT.get('ROTATE_REFRESH_TOKENS'):
                 new_refresh = str(token)
                 response.set_cookie(
                     'refresh_token',
                     new_refresh,
                     max_age=int(settings.SIMPLE_JWT['REFRESH_TOKEN_LIFETIME'].total_seconds()),
-                    path='/api/auth/',
+                    path='/api/',
                     **base,
                 )
                 if settings.SIMPLE_JWT.get('BLACKLIST_AFTER_ROTATION'):
@@ -286,7 +519,7 @@ class CookieTokenRefreshView(APIView):
 
 
 class LogoutView(APIView):
-    """Blacklist the refresh token and clear auth cookies."""
+    """Blacklist the refresh token, invalidate session, and clear auth cookies."""
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
@@ -297,6 +530,18 @@ class LogoutView(APIView):
                 token.blacklist()
         except Exception:
             pass
+
+        # Invalidate active session
+        access_token = request.COOKIES.get('access_token')
+        if access_token:
+            try:
+                from rest_framework_simplejwt.tokens import AccessToken
+                token = AccessToken(access_token)
+                jti = token.get('jti', '')
+                if jti:
+                    SesionActiva.objects.filter(token_jti=jti).update(activa=False)
+            except Exception:
+                pass
 
         if request.user.negocio:
             AuditLog.objects.create(
@@ -312,6 +557,387 @@ class LogoutView(APIView):
         response = Response({'detail': 'Sesion cerrada'})
         _clear_auth_cookies(response)
         return response
+
+
+class LogoutAllView(APIView):
+    """Invalidate ALL sessions for the current user (remote logout)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from api.security.session_manager import invalidate_all_sessions
+        count = invalidate_all_sessions(request.user)
+
+        if request.user.negocio:
+            AuditLog.objects.create(
+                negocio=request.user.negocio,
+                usuario=request.user,
+                accion='SESSION_INVALIDATE',
+                modelo='Usuario',
+                objeto_id=str(request.user.id),
+                descripcion=f'Todas las sesiones invalidadas ({count} sesiones)',
+                ip_address=_get_client_ip(request),
+            )
+
+        response = Response({'detail': f'{count} sesiones cerradas'})
+        _clear_auth_cookies(response)
+        return response
+
+
+class ChangePasswordView(APIView):
+    """Change password with policy enforcement."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        serializer = ChangePasswordSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        user = request.user
+        if not user.check_password(serializer.validated_data['old_password']):
+            return Response(
+                {'detail': 'Contrasena actual incorrecta'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        new_password = serializer.validated_data['new_password']
+        user.set_password(new_password)
+        user.ultimo_cambio_password = timezone.now()
+        user.forzar_cambio_password = False
+        user.save(update_fields=['password', 'ultimo_cambio_password', 'forzar_cambio_password'])
+
+        # Invalidate all other sessions
+        from api.security.session_manager import invalidate_all_sessions
+        invalidate_all_sessions(user)
+
+        if user.negocio:
+            AuditLog.objects.create(
+                negocio=user.negocio,
+                usuario=user,
+                accion='PASSWORD_CHANGE',
+                modelo='Usuario',
+                objeto_id=str(user.id),
+                descripcion='Contrasena cambiada exitosamente',
+                ip_address=_get_client_ip(request),
+            )
+
+        response = Response({'detail': 'Contrasena actualizada exitosamente'})
+        _clear_auth_cookies(response)
+        return response
+
+
+class Setup2FAView(APIView):
+    """Setup MFA/2FA with TOTP."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        if request.user.two_factor_enabled:
+            return Response(
+                {'detail': '2FA ya esta habilitado'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from api.security.totp import setup_2fa
+        result = setup_2fa(request.user)
+
+        if request.user.negocio:
+            AuditLog.objects.create(
+                negocio=request.user.negocio,
+                usuario=request.user,
+                accion='MFA_SETUP',
+                modelo='Usuario',
+                objeto_id=str(request.user.id),
+                descripcion='Configuracion 2FA iniciada',
+                ip_address=_get_client_ip(request),
+            )
+
+        return Response(result)
+
+
+class Confirm2FAView(APIView):
+    """Confirm 2FA setup by verifying first token."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        token = request.data.get('token', '')
+        if not token or len(token) != 6:
+            return Response(
+                {'detail': 'Token de 6 digitos requerido'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from api.security.totp import confirm_2fa
+        if confirm_2fa(request.user, token):
+            if request.user.negocio:
+                AuditLog.objects.create(
+                    negocio=request.user.negocio,
+                    usuario=request.user,
+                    accion='MFA_SETUP',
+                    modelo='Usuario',
+                    objeto_id=str(request.user.id),
+                    descripcion='2FA habilitado exitosamente',
+                    ip_address=_get_client_ip(request),
+                )
+            return Response({'detail': '2FA habilitado exitosamente'})
+
+        return Response(
+            {'detail': 'Token invalido. Intente de nuevo.'},
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
+
+class Disable2FAView(APIView):
+    """Disable 2FA (requires current password AND valid TOTP code)."""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        password = request.data.get('password', '')
+        totp_code = request.data.get('token', '')
+
+        if not password or not totp_code:
+            return Response(
+                {'detail': 'Se requiere password y token TOTP'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if not request.user.check_password(password):
+            return Response(
+                {'detail': 'Contrasena incorrecta'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from api.security.totp import verify_totp
+        if not verify_totp(request.user.two_factor_secret, totp_code):
+            return Response(
+                {'detail': 'Codigo TOTP invalido'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from api.security.totp import disable_2fa
+        disable_2fa(request.user)
+
+        if request.user.negocio:
+            AuditLog.objects.create(
+                negocio=request.user.negocio,
+                usuario=request.user,
+                accion='MFA_SETUP',
+                modelo='Usuario',
+                objeto_id=str(request.user.id),
+                descripcion='2FA deshabilitado',
+                ip_address=_get_client_ip(request),
+            )
+
+        return Response({'detail': '2FA deshabilitado'})
+
+
+class SessionListView(APIView):
+    """List active sessions for current user."""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        sessions = SesionActiva.objects.filter(
+            usuario=request.user, activa=True
+        ).order_by('-creado_en')
+        serializer = SesionActivaSerializer(sessions, many=True)
+        return Response(serializer.data)
+
+    def delete(self, request):
+        """Invalidate a specific session by ID."""
+        session_id = request.data.get('session_id', '')
+        if not session_id:
+            return Response(
+                {'detail': 'session_id requerido'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        deleted = SesionActiva.objects.filter(
+            id=session_id, usuario=request.user, activa=True
+        ).update(activa=False)
+        if deleted:
+            return Response({'detail': 'Sesion invalidada'})
+        return Response(
+            {'detail': 'Sesion no encontrada'},
+            status=status.HTTP_404_NOT_FOUND,
+        )
+
+
+class ApiKeyViewSet(viewsets.ModelViewSet):
+    """API key management for external integrations."""
+    permission_classes = [IsAuthenticated, CanManageApiKeys]
+    serializer_class = ApiKeySerializer
+    http_method_names = ['get', 'post', 'delete']
+
+    def get_queryset(self):
+        if self.request.user.rol == 'SUPER_ADMIN':
+            return ApiKey.objects.all()
+        return ApiKey.objects.filter(negocio=self.request.user.negocio)
+
+    def create(self, request):
+        serializer = ApiKeyCreateSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        from api.security.data_protection import generate_api_key, hash_api_key
+        raw_key, prefix = generate_api_key()
+
+        api_key = ApiKey.objects.create(
+            negocio=request.user.negocio,
+            nombre=serializer.validated_data['nombre'],
+            key_hash=hash_api_key(raw_key),
+            key_prefix=prefix,
+            scopes=serializer.validated_data['scopes'],
+            expira_en=serializer.validated_data.get('expira_en'),
+            creado_por=request.user,
+        )
+
+        if request.user.negocio:
+            AuditLog.objects.create(
+                negocio=request.user.negocio,
+                usuario=request.user,
+                accion='API_KEY_CREATE',
+                modelo='ApiKey',
+                objeto_id=str(api_key.id),
+                descripcion=f'API key creada: {api_key.nombre}',
+                ip_address=_get_client_ip(request),
+            )
+
+        return Response({
+            'id': str(api_key.id),
+            'nombre': api_key.nombre,
+            'key': raw_key,  # Only shown once!
+            'prefix': prefix,
+            'scopes': api_key.scopes,
+            'detail': 'Guarde esta API key. No se mostrara de nuevo.',
+        }, status=status.HTTP_201_CREATED)
+
+
+class AlertaSeguridadViewSet(viewsets.ModelViewSet):
+    """Security alerts management."""
+    serializer_class = AlertaSeguridadSerializer
+    permission_classes = [IsAuthenticated, CanManageSecurity]
+    http_method_names = ['get', 'patch']
+
+    def get_queryset(self):
+        qs = AlertaSeguridad.objects.filter(negocio=self.request.user.negocio)
+        tipo = self.request.query_params.get('tipo')
+        severidad = self.request.query_params.get('severidad')
+        no_leida = self.request.query_params.get('no_leida')
+        if tipo:
+            qs = qs.filter(tipo=tipo)
+        if severidad:
+            qs = qs.filter(severidad=severidad)
+        if no_leida:
+            qs = qs.filter(leida=False)
+        return qs
+
+
+class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
+    """Audit log viewer (read-only, immutable)."""
+    serializer_class = AuditLogSerializer
+    permission_classes = [IsAuthenticated, CanViewAuditLogs]
+
+    def get_queryset(self):
+        qs = AuditLog.objects.filter(negocio=self.request.user.negocio)
+        accion = self.request.query_params.get('accion')
+        usuario_id = self.request.query_params.get('usuario')
+        modelo = self.request.query_params.get('modelo')
+        fecha_desde = self.request.query_params.get('fecha_desde')
+        fecha_hasta = self.request.query_params.get('fecha_hasta')
+        if accion:
+            qs = qs.filter(accion=accion)
+        if usuario_id:
+            qs = qs.filter(usuario_id=usuario_id)
+        if modelo:
+            qs = qs.filter(modelo__icontains=modelo)
+        if fecha_desde:
+            qs = qs.filter(fecha__gte=fecha_desde)
+        if fecha_hasta:
+            qs = qs.filter(fecha__lte=fecha_hasta)
+        return qs
+
+
+class ConfirmacionTransaccionViewSet(viewsets.ModelViewSet):
+    """Double confirmation for high-value transactions."""
+    serializer_class = ConfirmacionTransaccionSerializer
+    permission_classes = [IsAuthenticated, IsManagementRole]
+    http_method_names = ['get', 'post', 'patch']
+
+    def get_queryset(self):
+        return ConfirmacionTransaccion.objects.filter(
+            negocio=self.request.user.negocio
+        )
+
+    @action(detail=True, methods=['post'])
+    def aprobar(self, request, pk=None):
+        confirmacion = self.get_object()
+        if confirmacion.estado != 'PENDIENTE':
+            return Response(
+                {'detail': 'Esta confirmacion ya fue procesada'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if confirmacion.esta_expirada:
+            confirmacion.estado = 'EXPIRADA'
+            confirmacion.save(update_fields=['estado'])
+            return Response(
+                {'detail': 'Confirmacion expirada'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        # Separation of duties: approver != requester
+        if str(confirmacion.solicitado_por_id) == str(request.user.id):
+            return Response(
+                {'detail': 'No puede aprobar su propia solicitud'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        confirmacion.confirmado_por = request.user
+        confirmacion.estado = 'APROBADA'
+        confirmacion.save(update_fields=['confirmado_por', 'estado'])
+        return Response({'detail': 'Transaccion aprobada'})
+
+    @action(detail=True, methods=['post'])
+    def rechazar(self, request, pk=None):
+        confirmacion = self.get_object()
+        if confirmacion.estado != 'PENDIENTE':
+            return Response(
+                {'detail': 'Esta confirmacion ya fue procesada'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        confirmacion.confirmado_por = request.user
+        confirmacion.estado = 'RECHAZADA'
+        confirmacion.save(update_fields=['confirmado_por', 'estado'])
+        return Response({'detail': 'Transaccion rechazada'})
+
+
+class LicenciaVerificarView(APIView):
+    """Verify license validity."""
+    permission_classes = [IsAuthenticated, IsAdminRole]
+
+    def get(self, request):
+        negocio = request.user.negocio
+        if not negocio:
+            return Response({'detail': 'Sin negocio asignado'}, status=400)
+
+        licencia = LicenciaSistema.objects.filter(
+            negocio=negocio, activa=True
+        ).first()
+
+        if not licencia:
+            return Response({
+                'valida': True,
+                'tipo': 'FREE',
+                'detalle': 'Sin licencia activa (modo libre)',
+            })
+
+        from api.security.license_manager import verify_license
+        is_valid, reason = verify_license(licencia)
+
+        licencia.ultima_verificacion = timezone.now()
+        licencia.save(update_fields=['ultima_verificacion'])
+
+        return Response({
+            'valida': is_valid,
+            'tipo': licencia.tipo,
+            'detalle': reason,
+            'max_usuarios': licencia.max_usuarios,
+            'max_sucursales': licencia.max_sucursales,
+            'fecha_fin': licencia.fecha_fin,
+        })
 
 
 # =============================================================================

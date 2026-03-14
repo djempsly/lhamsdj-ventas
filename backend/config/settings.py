@@ -34,6 +34,8 @@ INSTALLED_APPS = [
     'corsheaders',
     'drf_spectacular',
     'django_celery_beat',
+    'dbbackup',
+    'channels',
     'api',
 ]
 
@@ -49,7 +51,10 @@ MIDDLEWARE = [
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
+    'csp.middleware.CSPMiddleware',
+    'api.middleware.IPBlacklistMiddleware',
     'api.middleware.NegocioFilterMiddleware',
+    'api.middleware.SecurityHeadersMiddleware',
     'api.middleware.AuditMiddleware',
 ]
 
@@ -96,13 +101,33 @@ if not DEBUG:
 
 AUTH_USER_MODEL = 'api.Usuario'
 
+# --- PASSWORD SECURITY ---------------------------------------------------
+
+# Argon2id - superior a bcrypt para resistencia a GPU/ASIC attacks
+PASSWORD_HASHERS = [
+    'django.contrib.auth.hashers.Argon2PasswordHasher',
+    'django.contrib.auth.hashers.PBKDF2PasswordHasher',
+    'django.contrib.auth.hashers.PBKDF2SHA1PasswordHasher',
+]
+
 AUTH_PASSWORD_VALIDATORS = [
     {'NAME': 'django.contrib.auth.password_validation.UserAttributeSimilarityValidator'},
     {'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
-     'OPTIONS': {'min_length': 10}},
+     'OPTIONS': {'min_length': 12}},
     {'NAME': 'django.contrib.auth.password_validation.CommonPasswordValidator'},
     {'NAME': 'django.contrib.auth.password_validation.NumericPasswordValidator'},
+    {'NAME': 'api.security.validators.ComplexPasswordValidator'},
 ]
+
+# Password expiration (days)
+PASSWORD_EXPIRY_DAYS = 90
+
+# Account lockout
+MAX_LOGIN_ATTEMPTS = 5
+LOCKOUT_DURATION_MINUTES = 15
+
+# Max concurrent sessions per user
+MAX_CONCURRENT_SESSIONS = 3
 
 # --- REST FRAMEWORK ------------------------------------------------------
 
@@ -120,35 +145,40 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
     ],
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '100/hour',
-        'user': '1000/hour',
-        'login': '10/minute',
+        'anon': '20/minute',
+        'user': '100/minute',
+        'login': '5/minute',
+        'transactions': '30/minute',
     },
     'EXCEPTION_HANDLER': 'rest_framework.views.exception_handler',
     'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
     'DEFAULT_RENDERER_CLASSES': [
         'rest_framework.renderers.JSONRenderer',
     ],
+    'DEFAULT_VERSIONING_CLASS': 'rest_framework.versioning.URLPathVersioning',
+    'DEFAULT_VERSION': 'v1',
+    'ALLOWED_VERSIONS': ['v1'],
 }
 
 # --- DRF SPECTACULAR (API DOCS) ------------------------------------------
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Sistema de Ventas API',
-    'DESCRIPTION': 'ERP completo con facturación electrónica DGII, contabilidad, inventario, AI y más.',
+    'DESCRIPTION': 'ERP completo con facturacion electronica DGII, contabilidad, inventario, AI y mas.',
     'VERSION': '2.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
     'COMPONENT_SPLIT_REQUEST': True,
     'TAGS': [
-        {'name': 'Auth', 'description': 'Autenticación y sesiones'},
-        {'name': 'Negocios', 'description': 'Gestión de empresas'},
+        {'name': 'Auth', 'description': 'Autenticacion y sesiones'},
+        {'name': 'Seguridad', 'description': 'MFA, sesiones, API keys'},
+        {'name': 'Negocios', 'description': 'Gestion de empresas'},
         {'name': 'Productos', 'description': 'Inventario y productos'},
-        {'name': 'Ventas', 'description': 'Punto de venta y facturación'},
+        {'name': 'Ventas', 'description': 'Punto de venta y facturacion'},
         {'name': 'Compras', 'description': 'Compras y proveedores'},
         {'name': 'Contabilidad', 'description': 'Plan de cuentas y asientos'},
         {'name': 'Fiscal', 'description': 'Reportes DGII 606/607/608'},
-        {'name': 'Bancos', 'description': 'Reconciliación bancaria'},
-        {'name': 'AI', 'description': 'Análisis inteligente'},
+        {'name': 'Bancos', 'description': 'Reconciliacion bancaria'},
+        {'name': 'AI', 'description': 'Analisis inteligente'},
     ],
 }
 
@@ -161,16 +191,18 @@ if DEBUG:
 # --- JWT -----------------------------------------------------------------
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=1),
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
     'ROTATE_REFRESH_TOKENS': True,
     'BLACKLIST_AFTER_ROTATION': True,
     'UPDATE_LAST_LOGIN': True,
+    'TOKEN_OBTAIN_SERIALIZER': 'rest_framework_simplejwt.serializers.TokenObtainPairSerializer',
 }
 
 # --- FISCAL ENCRYPTION ---------------------------------------------------
 
 FISCAL_ENCRYPTION_KEY = os.getenv('FISCAL_ENCRYPTION_KEY', '')
+AES_256_KEY = os.getenv('AES_256_KEY', '')
 
 # --- AI ------------------------------------------------------------------
 
@@ -178,8 +210,14 @@ ANTHROPIC_API_KEY = os.getenv('ANTHROPIC_API_KEY', '')
 
 # --- COOKIES -------------------------------------------------------------
 
-COOKIE_DOMAIN = os.getenv('COOKIE_DOMAIN', '') or None  # None = browser uses response origin
+COOKIE_DOMAIN = os.getenv('COOKIE_DOMAIN', '') or None
 COOKIE_SECURE = os.getenv('COOKIE_SECURE', 'False').lower() in ('true', '1')
+SESSION_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = 'Lax'
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SAMESITE = 'Lax'
 
 # --- CORS ----------------------------------------------------------------
 
@@ -196,6 +234,7 @@ CORS_ALLOW_HEADERS = [
     'user-agent',
     'x-csrftoken',
     'x-requested-with',
+    'x-api-key',
 ]
 
 # --- SECURITY HEADERS ----------------------------------------------------
@@ -209,8 +248,27 @@ if not DEBUG:
     SECURE_HSTS_INCLUDE_SUBDOMAINS = True
     SECURE_HSTS_PRELOAD = True
     SECURE_SSL_REDIRECT = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+
+# --- CSP (Content Security Policy) ---------------------------------------
+
+CSP_DEFAULT_SRC = ("'self'",)
+CSP_SCRIPT_SRC = ("'self'",)
+CSP_STYLE_SRC = ("'self'", "'unsafe-inline'")
+CSP_IMG_SRC = ("'self'", "data:", "https:")
+CSP_FONT_SRC = ("'self'", "https://fonts.gstatic.com")
+CSP_CONNECT_SRC = ("'self'",)
+CSP_FRAME_ANCESTORS = ("'none'",)
+CSP_FORM_ACTION = ("'self'",)
+
+# --- REQUEST SIZE LIMITS -------------------------------------------------
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10 MB
+FILE_UPLOAD_MAX_MEMORY_SIZE = 10485760  # 10 MB
+
+# --- RATE LIMITING (django-ratelimit) ------------------------------------
+
+RATELIMIT_USE_CACHE = 'default'
+RATELIMIT_FAIL_OPEN = False
 
 # --- I18N ----------------------------------------------------------------
 
@@ -221,7 +279,7 @@ USE_L10N = True
 USE_TZ = True
 
 LANGUAGES = [
-    ('es', 'Español'),
+    ('es', 'Espanol'),
     ('en', 'English'),
 ]
 
@@ -240,6 +298,11 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
+    'filters': {
+        'mask_sensitive': {
+            '()': 'api.security.log_filters.SensitiveDataFilter',
+        },
+    },
     'formatters': {
         'verbose': {
             'format': '[{asctime}] {levelname} {name} {message}',
@@ -250,16 +313,23 @@ LOGGING = {
         'console': {
             'class': 'logging.StreamHandler',
             'formatter': 'verbose',
+            'filters': ['mask_sensitive'],
         },
         'security_file': {
-            'class': 'logging.FileHandler',
+            'class': 'logging.handlers.RotatingFileHandler',
             'filename': BASE_DIR / 'logs' / 'security.log',
             'formatter': 'verbose',
+            'filters': ['mask_sensitive'],
+            'maxBytes': 50 * 1024 * 1024,  # 50 MB
+            'backupCount': 10,
         },
         'audit_file': {
-            'class': 'logging.FileHandler',
+            'class': 'logging.handlers.RotatingFileHandler',
             'filename': BASE_DIR / 'logs' / 'audit.log',
             'formatter': 'verbose',
+            'filters': ['mask_sensitive'],
+            'maxBytes': 50 * 1024 * 1024,
+            'backupCount': 10,
         },
     },
     'loggers': {
@@ -295,7 +365,31 @@ CELERY_TASK_TIME_LIMIT = 300
 CELERY_BEAT_SCHEDULE = {
     'reintentar-ecf-contingencia': {
         'task': 'api.tasks.reintentar_ecf_contingencia',
-        'schedule': 300.0,  # cada 5 minutos
+        'schedule': 300.0,
+    },
+    'backup-diario': {
+        'task': 'api.tasks.backup_diario',
+        'schedule': 86400.0,  # cada 24 horas
+    },
+    'limpiar-sesiones-expiradas': {
+        'task': 'api.tasks.limpiar_sesiones_expiradas',
+        'schedule': 3600.0,  # cada hora
+    },
+    'detectar-anomalias': {
+        'task': 'api.tasks.detectar_anomalias_todos',
+        'schedule': 1800.0,  # cada 30 min
+    },
+    'verificar-licencias': {
+        'task': 'api.tasks.verificar_licencias',
+        'schedule': 86400.0,  # cada 24 horas
+    },
+    'limpiar-backups-expirados': {
+        'task': 'api.tasks.limpiar_backups_expirados',
+        'schedule': 86400.0,
+    },
+    'limpiar-ips-bloqueadas-expiradas': {
+        'task': 'api.tasks.limpiar_ips_expiradas',
+        'schedule': 3600.0,
     },
 }
 
@@ -311,6 +405,18 @@ CACHES = {
         },
     }
 }
+
+# --- DBBACKUP ------------------------------------------------------------
+
+DBBACKUP_STORAGE = 'django.core.files.storage.FileSystemStorage'
+DBBACKUP_STORAGE_OPTIONS = {
+    'location': os.getenv('BACKUP_DIR', '/var/backups/sistema-ventas'),
+}
+DBBACKUP_CLEANUP_KEEP = 30
+
+# --- LICENSE --------------------------------------------------------------
+
+LICENSE_SIGNING_KEY = os.getenv('LICENSE_SIGNING_KEY', SECRET_KEY)
 
 # --- SENTRY --------------------------------------------------------------
 

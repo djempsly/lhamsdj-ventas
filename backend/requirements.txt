@@ -41,6 +41,15 @@ reportlab==4.2.5
 # Audit
 django-auditlog==3.0.0
 
+# Security
+argon2-cffi>=23.1.0
+pyotp==2.9.0
+qrcode[pil]==7.4.2
+django-ratelimit==4.1.0
+django-csp==3.8
+bleach==6.1.0
+django-dbbackup==4.1.0
+
 # Testing
 pytest==8.3.4
 pytest-django==4.9.0

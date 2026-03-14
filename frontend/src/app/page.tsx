@@ -1,8 +1,9 @@
 "use client";
 import { useState } from "react";
 import Image from "next/image";
+import type { LoginResponse } from "@/types/security";
 
-const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000/api/v1";
 
 export default function LoginPage() {
   const [username, setUsername] = useState("");
@@ -11,10 +12,14 @@ export default function LoginPage() {
   const [error, setError] = useState("");
   const [showPassword, setShowPassword] = useState(false);
 
+  // MFA state
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaSessionToken, setMfaSessionToken] = useState("");
+  const [mfaCode, setMfaCode] = useState("");
+
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
 
-    // Client-side validation
     const trimmedUser = username.trim();
     if (!trimmedUser || !password) {
       setError("Complete todos los campos");
@@ -31,22 +36,80 @@ export default function LoginPage() {
     try {
       const res = await fetch(`${API_URL}/auth/login/`, {
         method: "POST",
-        credentials: "include", // Receive httpOnly cookies from backend
+        credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username: trimmedUser, password }),
+      });
+      const data: LoginResponse = await res.json();
+
+      if (res.ok) {
+        // Check if MFA is required
+        if (data.requires_mfa && data.session_token) {
+          setMfaRequired(true);
+          setMfaSessionToken(data.session_token);
+          if (data.usuario) {
+            localStorage.setItem("usuario", JSON.stringify(data.usuario));
+          }
+          return;
+        }
+
+        if (data.usuario) {
+          localStorage.setItem("usuario", JSON.stringify(data.usuario));
+
+          // Check if password change is required
+          if (data.usuario.forzar_cambio_password || data.usuario.password_expirado) {
+            window.location.href = "/auth/cambiar-password";
+            return;
+          }
+        }
+        window.location.href = "/dashboard";
+      } else if (res.status === 429) {
+        setError((data as { detail?: string }).detail || "Demasiados intentos. Espere unos minutos.");
+      } else if (res.status === 403) {
+        setError((data as { detail?: string }).detail || "Acceso denegado");
+      } else {
+        setError((data as { detail?: string }).detail || "Usuario o contrasena incorrectos");
+      }
+    } catch {
+      setError("Error de conexion con el servidor");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMFAVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfaCode || mfaCode.length !== 6) {
+      setError("Ingrese el codigo de 6 digitos");
+      return;
+    }
+
+    setLoading(true);
+    setError("");
+
+    try {
+      const res = await fetch(`${API_URL}/auth/mfa/verify/`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          session_token: mfaSessionToken,
+          mfa_token: mfaCode,
+        }),
       });
       const data = await res.json();
 
       if (res.ok) {
-        // Only store non-sensitive display data (tokens are in httpOnly cookies)
         if (data.usuario) {
           localStorage.setItem("usuario", JSON.stringify(data.usuario));
+          if (data.usuario.forzar_cambio_password || data.usuario.password_expirado) {
+            window.location.href = "/auth/cambiar-password";
+            return;
+          }
         }
         window.location.href = "/dashboard";
-      } else if (res.status === 429) {
-        setError(data.detail || "Demasiados intentos. Espere unos minutos.");
       } else {
-        setError(data.detail || "Usuario o contrasena incorrectos");
+        setError(data.detail || "Codigo MFA invalido");
       }
     } catch {
       setError("Error de conexion con el servidor");
@@ -331,57 +394,113 @@ export default function LoginPage() {
             <h2 className="form-title">Iniciar Sesion</h2>
             <p className="form-subtitle">Accede a tu panel de control</p>
 
-            <form onSubmit={handleLogin}>
-              {error && (
-                <div className="error-box">
-                  <span>!</span> <span>{String(error).substring(0, 200)}</span>
-                </div>
-              )}
+            {!mfaRequired ? (
+              <form onSubmit={handleLogin}>
+                {error && (
+                  <div className="error-box">
+                    <span>!</span> <span>{String(error).substring(0, 200)}</span>
+                  </div>
+                )}
 
-              <div className="form-group">
-                <label className="form-label">Usuario</label>
-                <div className="input-wrap">
-                  <span className="input-icon">U</span>
-                  <input
-                    className="form-input"
-                    type="text"
-                    placeholder="Escribe tu usuario"
-                    value={username}
-                    onChange={e => setUsername(e.target.value)}
-                    maxLength={150}
-                    autoComplete="username"
-                    required
-                  />
+                <div className="form-group">
+                  <label className="form-label">Usuario</label>
+                  <div className="input-wrap">
+                    <span className="input-icon">U</span>
+                    <input
+                      className="form-input"
+                      type="text"
+                      placeholder="Escribe tu usuario"
+                      value={username}
+                      onChange={e => setUsername(e.target.value)}
+                      maxLength={150}
+                      autoComplete="username"
+                      required
+                    />
+                  </div>
                 </div>
-              </div>
 
-              <div className="form-group">
-                <label className="form-label">Contrasena</label>
-                <div className="input-wrap">
-                  <span className="input-icon">K</span>
-                  <input
-                    className="form-input"
-                    type={showPassword ? "text" : "password"}
-                    placeholder="Escribe tu contrasena"
-                    value={password}
-                    onChange={e => setPassword(e.target.value)}
-                    maxLength={128}
-                    autoComplete="current-password"
-                    required
-                  />
-                  <button type="button" className="eye-btn" onClick={() => setShowPassword(!showPassword)}>
-                    {showPassword ? "x" : "o"}
-                  </button>
+                <div className="form-group">
+                  <label className="form-label">Contrasena</label>
+                  <div className="input-wrap">
+                    <span className="input-icon">K</span>
+                    <input
+                      className="form-input"
+                      type={showPassword ? "text" : "password"}
+                      placeholder="Escribe tu contrasena"
+                      value={password}
+                      onChange={e => setPassword(e.target.value)}
+                      maxLength={128}
+                      autoComplete="current-password"
+                      required
+                    />
+                    <button type="button" className="eye-btn" onClick={() => setShowPassword(!showPassword)}>
+                      {showPassword ? "x" : "o"}
+                    </button>
+                  </div>
                 </div>
-              </div>
 
-              <button className="btn-submit" type="submit" disabled={loading}>
-                {loading
-                  ? <><span className="spinner" />Verificando...</>
-                  : "Entrar al Sistema"
-                }
-              </button>
-            </form>
+                <button className="btn-submit" type="submit" disabled={loading}>
+                  {loading
+                    ? <><span className="spinner" />Verificando...</>
+                    : "Entrar al Sistema"
+                  }
+                </button>
+              </form>
+            ) : (
+              <form onSubmit={handleMFAVerify}>
+                {error && (
+                  <div className="error-box">
+                    <span>!</span> <span>{String(error).substring(0, 200)}</span>
+                  </div>
+                )}
+
+                <div className="form-group">
+                  <label className="form-label">Codigo de verificacion (2FA)</label>
+                  <div className="input-wrap">
+                    <span className="input-icon">S</span>
+                    <input
+                      className="form-input"
+                      type="text"
+                      placeholder="000000"
+                      value={mfaCode}
+                      onChange={e => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                      maxLength={6}
+                      autoComplete="one-time-code"
+                      inputMode="numeric"
+                      autoFocus
+                      required
+                    />
+                  </div>
+                  <p style={{ fontSize: '12px', color: '#475569', marginTop: '8px' }}>
+                    Ingrese el codigo de su app autenticadora (Google Authenticator)
+                  </p>
+                </div>
+
+                <button className="btn-submit" type="submit" disabled={loading || mfaCode.length !== 6}>
+                  {loading
+                    ? <><span className="spinner" />Verificando...</>
+                    : "Verificar Codigo"
+                  }
+                </button>
+
+                <button
+                  type="button"
+                  style={{
+                    width: '100%', marginTop: '12px', padding: '10px',
+                    background: 'none', border: '1px solid rgba(255,255,255,0.1)',
+                    borderRadius: '12px', color: '#64748b', cursor: 'pointer',
+                    fontSize: '13px',
+                  }}
+                  onClick={() => {
+                    setMfaRequired(false);
+                    setMfaCode('');
+                    setError('');
+                  }}
+                >
+                  Volver al login
+                </button>
+              </form>
+            )}
 
             <p className="footer-text">&copy; 2026 L&apos;hams DJ - Todos los derechos reservados</p>
           </div>

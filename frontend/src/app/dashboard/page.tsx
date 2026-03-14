@@ -1,306 +1,308 @@
 "use client";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useMemo } from "react";
 import { posService } from "@/services/fiscal";
-import api from "@/lib/axios";
+import { formatCurrency } from "@/lib/constants";
+import {
+  AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
+  PieChart, Pie, Cell
+} from "recharts";
 
-const TEMAS = [
-  { nombre: "Oceano",  bg: "#03080f", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#0ea5e9", secondary: "#1d4ed8" },
-  { nombre: "Bosque",  bg: "#030f08", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#10b981", secondary: "#065f46" },
-  { nombre: "Fuego",   bg: "#0f0503", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#f97316", secondary: "#dc2626" },
-  { nombre: "Galaxia", bg: "#05030f", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#8b5cf6", secondary: "#6d28d9" },
-  { nombre: "Oro",     bg: "#0f0a03", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#f59e0b", secondary: "#b45309" },
-  { nombre: "Rosa",    bg: "#0f0308", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#ec4899", secondary: "#be185d" },
-  { nombre: "Claro",   bg: "#f1f5f9", card: "rgba(255,255,255,0.9)", borde: "rgba(0,0,0,0.08)",       texto: "#0f172a", subtexto: "#64748b", accent: "#0284c7", secondary: "#1d4ed8" },
-];
+const TEMA_DEFAULT = {
+  nombre: "Oceano",
+  bg: "#03080f", card: "rgba(255,255,255,0.02)",
+  borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5",
+  subtexto: "#475569", accent: "#0ea5e9", secondary: "#1d4ed8"
+};
 
-type Tema = typeof TEMAS[0];
+interface DashboardStats {
+  total_ventas: number;
+  total_ganancia: number;
+  cantidad_ventas: number;
+  ticket_promedio: number;
+  comparacion_periodo_anterior?: {
+    ventas: number;
+    transacciones: number;
+    porcentaje_cambio: number;
+  } | null;
+}
 
 export default function Dashboard() {
-  const [usuario, setUsuario] = useState<{nombre: string; rol: string} | null>(null);
-  const [tema, setTema] = useState<Tema>(TEMAS[0]);
-  const [showTemas, setShowTemas] = useState(false);
-  const [stats, setStats] = useState({
-    total_ventas: 0,
-    total_ganancia: 0,
-    cantidad_ventas: 0,
-    ticket_promedio: 0
+  const [usuario, setUsuario] = useState<{ nombre: string; rol: string } | null>(null);
+  const [tema, setTema] = useState(TEMA_DEFAULT);
+  const [stats, setStats] = useState<DashboardStats>({
+    total_ventas: 0, total_ganancia: 0, cantidad_ventas: 0, ticket_promedio: 0
   });
   const [loading, setLoading] = useState(true);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     const u = localStorage.getItem("usuario");
     if (!u) { window.location.href = "/"; return; }
-    try {
-      setUsuario(JSON.parse(u));
-    } catch {
-      localStorage.removeItem("usuario");
-      window.location.href = "/";
-      return;
-    }
-    const temaGuardado = localStorage.getItem("tema");
-    if (temaGuardado) {
-      try { setTema(JSON.parse(temaGuardado)); } catch { /* use default */ }
-    }
+    try { setUsuario(JSON.parse(u)); } catch { window.location.href = "/"; return; }
+    const tg = localStorage.getItem("tema");
+    if (tg) { try { setTema(JSON.parse(tg)); } catch { /* default */ } }
 
-    const fetchStats = async () => {
-      try {
-        const { data } = await posService.getDashboard();
-        setStats(data);
-      } catch {
-        // API error handled by interceptor
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchStats();
+    posService.getDashboard().then(({ data }) => {
+      setStats(data);
+    }).catch(() => {}).finally(() => setLoading(false));
   }, []);
-
-  const cambiarTema = (t: Tema) => {
-    setTema(t);
-    localStorage.setItem("tema", JSON.stringify(t));
-    setShowTemas(false);
-  };
-
-  const cerrarSesion = async () => {
-    try {
-      await api.post("/auth/logout/");
-    } catch {
-      // Ignore - cookies will be cleared server-side or expire
-    }
-    localStorage.removeItem("usuario");
-    localStorage.removeItem("tema");
-    window.location.href = "/";
-  };
 
   const esClaro = tema.nombre === "Claro";
 
-  const formatCurrency = (amount: number) => {
-    return new Intl.NumberFormat('es-DO', { style: 'currency', currency: 'DOP' }).format(amount);
-  };
+  // Sample chart data
+  const ventasDiarias = useMemo(() =>
+    Array.from({ length: 30 }, (_, i) => {
+      const d = new Date();
+      d.setDate(d.getDate() - (29 - i));
+      return {
+        fecha: d.toLocaleDateString("es-DO", { day: "2-digit", month: "short" }),
+        ventas: Math.round(Math.random() * 45000 + 8000),
+      };
+    }), []);
+
+  const categorias = useMemo(() => [
+    { name: "Bebidas", value: 35 },
+    { name: "Alimentos", value: 28 },
+    { name: "Limpieza", value: 18 },
+    { name: "Otros", value: 19 },
+  ], []);
+
+  const PIE_COLORS = [tema.accent, tema.secondary, "#10b981", "#f59e0b"];
+
+  const comp = stats.comparacion_periodo_anterior;
+  const pctChange = comp?.porcentaje_cambio || 0;
+
+  const kpis = [
+    { icon: "$", value: formatCurrency(stats.total_ventas), label: "Ventas de hoy", change: pctChange },
+    { icon: "#", value: String(stats.cantidad_ventas), label: "Transacciones", change: comp?.transacciones ? ((stats.cantidad_ventas - comp.transacciones) / comp.transacciones * 100) : 0 },
+    { icon: "+", value: stats.total_ganancia !== null ? formatCurrency(stats.total_ganancia) : "---", label: "Ganancia Estimada", change: 0 },
+    { icon: "~", value: formatCurrency(stats.ticket_promedio), label: "Ticket Promedio", change: 0 },
+  ];
+
+  const alertas = [
+    { tipo: "stock", label: "Productos con stock bajo", count: 5, color: "#f59e0b", bg: "rgba(245,158,11,0.08)", border: "rgba(245,158,11,0.15)" },
+    { tipo: "cxc", label: "CxC vencidas", count: 3, color: "#ef4444", bg: "rgba(239,68,68,0.08)", border: "rgba(239,68,68,0.15)" },
+    { tipo: "ncf", label: "NCF por agotarse", count: 2, color: "#3b82f6", bg: "rgba(59,130,246,0.08)", border: "rgba(59,130,246,0.15)" },
+  ];
+
+  if (!mounted) return null;
 
   return (
     <>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Sans:wght@300;400;500&display=swap');
-        * { margin:0; padding:0; box-sizing:border-box; }
-        body { background: ${tema.bg}; font-family: 'DM Sans', sans-serif; transition: background 0.3s; }
-
-        .dash-root { min-height:100vh; background:${tema.bg}; color:${tema.texto}; transition: all 0.3s; }
-
-        .navbar {
-          display:flex; align-items:center; justify-content:space-between;
-          padding: 0 32px; height: 64px;
-          background: ${esClaro ? "rgba(255,255,255,0.8)" : "rgba(255,255,255,0.02)"};
-          border-bottom: 1px solid ${tema.borde};
-          backdrop-filter: blur(12px);
-          position: sticky; top:0; z-index:100;
-          box-shadow: ${esClaro ? "0 1px 12px rgba(0,0,0,0.08)" : "none"};
-        }
-        .nav-left { display:flex; align-items:center; gap:12px; }
-        .nav-logo {
-          width:36px; height:36px;
-          background: linear-gradient(135deg, ${tema.secondary}, ${tema.accent});
-          border-radius:10px; display:flex; align-items:center; justify-content:center;
-          font-size:18px; font-weight:800; font-family:'Syne',sans-serif; color:white;
-          box-shadow: 0 4px 16px ${tema.accent}40;
-        }
-        .nav-title { font-family:'Syne',sans-serif; font-size:16px; font-weight:700; color:${tema.texto}; }
-        .nav-title span { color:${tema.accent}; }
-        .nav-right { display:flex; align-items:center; gap:12px; }
-
-        .btn-tema {
-          display:flex; align-items:center; gap:8px;
-          background: ${tema.card};
-          border: 1px solid ${tema.borde};
-          border-radius:10px; padding:7px 14px;
-          color:${tema.subtexto}; font-size:13px;
-          cursor:pointer; transition:all 0.2s;
-          font-family:'DM Sans',sans-serif; position:relative;
-        }
-        .btn-tema:hover { border-color:${tema.accent}50; color:${tema.accent}; }
-        .tema-dot { width:10px; height:10px; border-radius:50%; background: linear-gradient(135deg, ${tema.secondary}, ${tema.accent}); }
-
-        .temas-dropdown {
-          position:absolute; top:calc(100% + 8px); right:0;
-          background:${esClaro ? "#ffffff" : "#0d1829"};
-          border:1px solid ${tema.borde};
-          border-radius:14px; padding:10px;
-          display:flex; flex-direction:column; gap:4px;
-          min-width:160px;
-          box-shadow:0 20px 40px rgba(0,0,0,0.2);
-          animation: dropIn 0.2s ease; z-index:200;
-        }
-        @keyframes dropIn { from{opacity:0;transform:translateY(-8px)} to{opacity:1;transform:translateY(0)} }
-
-        .tema-option {
-          display:flex; align-items:center; gap:10px;
-          padding:8px 12px; border-radius:8px;
-          cursor:pointer; transition:all 0.15s;
-          font-size:13px; color:${tema.subtexto};
-          border:none; background:none; width:100%;
-          text-align:left; font-family:'DM Sans',sans-serif;
-        }
-        .tema-option:hover { background:${tema.card}; color:${tema.texto}; }
-        .tema-option.active { color:${tema.texto}; background:${tema.card}; }
-        .tema-color { width:14px; height:14px; border-radius:50%; flex-shrink:0; }
-
-        .btn-logout {
-          background:rgba(239,68,68,0.08); border:1px solid rgba(239,68,68,0.15);
-          border-radius:10px; padding:7px 14px;
-          color:#ef4444; font-size:13px; cursor:pointer;
-          transition:all 0.2s; font-family:'DM Sans',sans-serif;
-        }
-        .btn-logout:hover { background:rgba(239,68,68,0.15); }
-
-        .main { padding:32px; }
-
-        .welcome-text {
-          font-family:'Syne',sans-serif; font-size:28px;
-          font-weight:800; color:${tema.texto}; margin-bottom:6px;
-        }
+        .dash-page { padding:32px; font-family:'DM Sans',sans-serif; color:${tema.texto}; }
+        .welcome-text { font-family:'Syne',sans-serif; font-size:28px; font-weight:800; margin-bottom:6px; }
         .welcome-text span { color:${tema.accent}; }
         .welcome-sub { font-size:14px; color:${tema.subtexto}; margin-bottom:32px; }
-
-        .stats-grid {
-          display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr));
-          gap:16px; margin-bottom:32px;
-        }
-        .stat-card {
-          background:${tema.card}; border:1px solid ${tema.borde};
-          border-radius:16px; padding:24px; transition:all 0.2s; cursor:pointer;
-          box-shadow: ${esClaro ? "0 2px 12px rgba(0,0,0,0.06)" : "none"};
-        }
-        .stat-card:hover {
-          border-color:${tema.accent}40; transform:translateY(-2px);
-          box-shadow: ${esClaro ? "0 8px 24px rgba(0,0,0,0.1)" : `0 8px 24px ${tema.accent}10`};
-        }
-        .stat-icon {
-          width:44px; height:44px; border-radius:12px;
-          display:flex; align-items:center; justify-content:center;
-          font-size:20px; margin-bottom:16px;
-          background: linear-gradient(135deg, ${tema.secondary}25, ${tema.accent}15);
-        }
-        .stat-value { font-family:'Syne',sans-serif; font-size:28px; font-weight:800; color:${tema.texto}; margin-bottom:4px; }
-        .stat-label { font-size:13px; color:${tema.subtexto}; }
-        .stat-change { font-size:12px; color:#10b981; margin-top:8px; }
-
-        .section-title {
-          font-family:'Syne',sans-serif; font-size:13px; font-weight:700;
-          color:${tema.subtexto}; text-transform:uppercase;
-          letter-spacing:0.1em; margin-bottom:16px;
-        }
-        .menu-grid {
-          display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr));
-          gap:12px;
-        }
-        .menu-item {
-          background:${tema.card}; border:1px solid ${tema.borde};
-          border-radius:16px; padding:20px; cursor:pointer;
-          transition:all 0.2s; text-align:center;
-          box-shadow: ${esClaro ? "0 2px 8px rgba(0,0,0,0.05)" : "none"};
-        }
-        .menu-item:hover {
-          border-color:${tema.accent}40;
-          background: ${esClaro ? "#ffffff" : `linear-gradient(135deg, ${tema.secondary}10, ${tema.accent}08)`};
-          transform:translateY(-3px);
-          box-shadow: ${esClaro ? "0 8px 24px rgba(0,0,0,0.1)" : `0 8px 24px ${tema.accent}15`};
-        }
-        .menu-emoji { font-size:32px; margin-bottom:10px; }
-        .menu-name { font-family:'Syne',sans-serif; font-size:14px; font-weight:700; color:${tema.texto}; margin-bottom:4px; }
-        .menu-desc { font-size:12px; color:${tema.subtexto}; }
-
         .rol-badge {
           display:inline-flex; align-items:center; gap:6px;
           background:${tema.accent}15; border:1px solid ${tema.accent}30;
-          border-radius:100px; padding:4px 12px;
-          font-size:11px; color:${tema.accent};
-          font-weight:600; text-transform:uppercase;
-          letter-spacing:0.08em; margin-left:12px;
+          border-radius:100px; padding:4px 12px; font-size:11px; color:${tema.accent};
+          font-weight:600; text-transform:uppercase; letter-spacing:0.08em; margin-left:12px;
+        }
+        .stats-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(220px,1fr)); gap:16px; margin-bottom:32px; }
+        .stat-card {
+          background:${tema.card}; border:1px solid ${tema.borde}; border-radius:16px; padding:24px;
+          transition:all 0.2s; box-shadow:${esClaro ? "0 2px 12px rgba(0,0,0,0.06)" : "none"};
+        }
+        .stat-card:hover { border-color:${tema.accent}40; transform:translateY(-2px); box-shadow:${esClaro ? "0 8px 24px rgba(0,0,0,0.1)" : `0 8px 24px ${tema.accent}10`}; }
+        .stat-icon {
+          width:44px; height:44px; border-radius:12px; display:flex; align-items:center; justify-content:center;
+          font-size:20px; margin-bottom:16px; background:linear-gradient(135deg, ${tema.secondary}25, ${tema.accent}15);
+        }
+        .stat-value { font-family:'Syne',sans-serif; font-size:28px; font-weight:800; margin-bottom:4px; }
+        .stat-label { font-size:13px; color:${tema.subtexto}; }
+        .stat-change { font-size:12px; margin-top:8px; font-weight:600; }
+        .stat-change.up { color:#10b981; }
+        .stat-change.down { color:#ef4444; }
+        .stat-change.neutral { color:${tema.subtexto}; }
+        .charts-grid { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:32px; }
+        .chart-card {
+          background:${tema.card}; border:1px solid ${tema.borde}; border-radius:16px; padding:24px;
+          box-shadow:${esClaro ? "0 2px 12px rgba(0,0,0,0.06)" : "none"};
+        }
+        .chart-title { font-family:'Syne',sans-serif; font-size:14px; font-weight:700; margin-bottom:20px; color:${tema.subtexto}; text-transform:uppercase; letter-spacing:0.08em; }
+        .alerts-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:12px; margin-bottom:32px; }
+        .alert-card { border-radius:12px; padding:16px 20px; display:flex; align-items:center; gap:14px; }
+        .alert-icon { width:40px; height:40px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:16px; font-weight:800; }
+        .alert-count { font-family:'Syne',sans-serif; font-size:24px; font-weight:800; }
+        .alert-label { font-size:12px; margin-top:2px; }
+        .section-title { font-family:'Syne',sans-serif; font-size:13px; font-weight:700; color:${tema.subtexto}; text-transform:uppercase; letter-spacing:0.1em; margin-bottom:16px; }
+        .menu-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; }
+        .menu-item {
+          background:${tema.card}; border:1px solid ${tema.borde}; border-radius:16px; padding:20px;
+          cursor:pointer; transition:all 0.2s; text-align:center;
+          box-shadow:${esClaro ? "0 2px 8px rgba(0,0,0,0.05)" : "none"};
+        }
+        .menu-item:hover {
+          border-color:${tema.accent}40;
+          background:${esClaro ? "#ffffff" : `linear-gradient(135deg, ${tema.secondary}10, ${tema.accent}08)`};
+          transform:translateY(-3px); box-shadow:${esClaro ? "0 8px 24px rgba(0,0,0,0.1)" : `0 8px 24px ${tema.accent}15`};
+        }
+        .menu-emoji { font-size:28px; margin-bottom:8px; font-family:'Syne',sans-serif; font-weight:800; color:${tema.accent}; }
+        .menu-name { font-family:'Syne',sans-serif; font-size:13px; font-weight:700; margin-bottom:3px; }
+        .menu-desc { font-size:11px; color:${tema.subtexto}; }
+        @keyframes pulse { 0%,100%{opacity:0.4} 50%{opacity:0.7} }
+        .skeleton { background:${tema.borde}; border-radius:8px; animation:pulse 1.5s ease-in-out infinite; }
+        .sk-card { background:${tema.card}; border:1px solid ${tema.borde}; border-radius:16px; padding:24px; }
+        .sk-block { height:20px; margin-bottom:12px; }
+        .sk-big { height:36px; margin-bottom:8px; width:60%; }
+        .sk-small { height:14px; width:40%; }
+        .sk-chart { height:250px; }
+        .pie-legend { display:flex; flex-wrap:wrap; gap:12px; margin-top:16px; justify-content:center; }
+        .pie-legend-item { display:flex; align-items:center; gap:6px; font-size:12px; color:${tema.subtexto}; }
+        .pie-legend-dot { width:10px; height:10px; border-radius:50%; }
+        @media (max-width: 768px) {
+          .dash-page { padding:16px; }
+          .charts-grid { grid-template-columns:1fr; }
+          .alerts-grid { grid-template-columns:1fr; }
+          .menu-grid { grid-template-columns:repeat(2, 1fr); }
+          .stat-value { font-size:22px; }
+        }
+        @media (max-width: 1024px) {
+          .charts-grid { grid-template-columns:1fr; }
+          .alerts-grid { grid-template-columns:1fr 1fr 1fr; }
         }
       `}</style>
 
-      <div className="dash-root">
-        <nav className="navbar">
-          <div className="nav-left">
-            <div className="nav-logo">L</div>
-            <span className="nav-title">Lhams-<span>DJ</span></span>
-          </div>
-          <div className="nav-right">
-            <div style={{position:"relative"}}>
-              <button className="btn-tema" onClick={() => setShowTemas(!showTemas)}>
-                <div className="tema-dot" />
-                {tema.nombre} <span style={{fontSize:10}}>v</span>
-              </button>
-              {showTemas && (
-                <div className="temas-dropdown">
-                  {TEMAS.map(t => (
-                    <button key={t.nombre} className={`tema-option ${t.nombre === tema.nombre ? "active" : ""}`} onClick={() => cambiarTema(t)}>
-                      <div className="tema-color" style={{background:`linear-gradient(135deg, ${t.secondary}, ${t.accent})`}} />
-                      {t.nombre}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-            <button className="btn-logout" onClick={cerrarSesion}>Salir</button>
-          </div>
-        </nav>
+      <div className="dash-page">
+        <h1 className="welcome-text">
+          Hola, <span>{usuario?.nombre}</span>
+          <span className="rol-badge">{usuario?.rol?.replace("_", " ")}</span>
+        </h1>
+        <p className="welcome-sub">Aqui esta el resumen de tu negocio hoy</p>
 
-        <main className="main">
-          <h1 className="welcome-text">
-            Hola, <span>{usuario?.nombre}</span>
-            <span className="rol-badge">{usuario?.rol?.replace("_", " ")}</span>
-          </h1>
-          <p className="welcome-sub">Aqui esta el resumen de tu negocio hoy</p>
-
+        {/* KPI Cards */}
+        {loading ? (
           <div className="stats-grid">
-            {[
-              { icon:"$", value: loading ? "..." : formatCurrency(stats.total_ventas), label:"Ventas de hoy" },
-              { icon:"#", value: loading ? "..." : stats.cantidad_ventas,    label:"Transacciones" },
-              { icon:"+", value: loading ? "..." : (stats.total_ganancia !== null ? formatCurrency(stats.total_ganancia) : "---"), label:"Ganancia Estimada" },
-              { icon:"~", value: loading ? "..." : formatCurrency(stats.ticket_promedio),    label:"Ticket Promedio" },
-            ].map((s,i) => (
+            {[1, 2, 3, 4].map(i => (
+              <div className="sk-card" key={i}>
+                <div className="skeleton sk-block" style={{ width: 44, height: 44, borderRadius: 12 }} />
+                <div className="skeleton sk-big" />
+                <div className="skeleton sk-small" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="stats-grid">
+            {kpis.map((s, i) => (
               <div className="stat-card" key={i}>
                 <div className="stat-icon">{s.icon}</div>
                 <div className="stat-value">{s.value}</div>
                 <div className="stat-label">{s.label}</div>
-                <div className="stat-change">Actualizado hoy</div>
+                <div className={`stat-change ${s.change > 0 ? "up" : s.change < 0 ? "down" : "neutral"}`}>
+                  {s.change > 0 ? `+${s.change.toFixed(1)}%` : s.change < 0 ? `${s.change.toFixed(1)}%` : "Sin cambios"}
+                </div>
               </div>
             ))}
           </div>
+        )}
 
-          <div className="section-title">Modulos del sistema</div>
-          <div className="menu-grid">
-            {[
-              { emoji:"POS", name:"Punto de Venta",  desc:"Registrar ventas", link: "/dashboard/pos" },
-              { emoji:"INV", name:"Inventario",       desc:"Productos y stock", link: "/dashboard/productos" },
-              { emoji:"CLI", name:"Clientes",         desc:"Gestion de clientes", link: "/dashboard/clientes" },
-              { emoji:"PRV", name:"Proveedores",      desc:"Gestion de compras", link: "/dashboard/proveedores" },
-              { emoji:"COT", name:"Cotizaciones",     desc:"Presupuestos y propuestas", link: "/dashboard/cotizaciones" },
-              { emoji:"OC",  name:"Ordenes Compra",   desc:"Solicitudes con aprobacion", link: "/dashboard/ordenes-compra" },
-              { emoji:"CMP", name:"Compras",          desc:"Compras y retenciones", link: "/dashboard/compras" },
-              { emoji:"FAC", name:"Facturacion",      desc:"Historial y e-CF DGII", link: "/dashboard/ventas" },
-              { emoji:"CxC", name:"Cuentas x Cobrar", desc:"Cobranzas y aging", link: "/dashboard/cxc" },
-              { emoji:"CxP", name:"Cuentas x Pagar",  desc:"Pagos y vencimientos", link: "/dashboard/cxp" },
-              { emoji:"CAJ", name:"Cuadres de Caja",  desc:"Apertura y cierre", link: "/dashboard/cuadres" },
-              { emoji:"RPT", name:"Reportes",         desc:"Reportes fiscales 606/607/608", link: "/dashboard/reportes" },
-              { emoji:"CTB", name:"Contabilidad",     desc:"Plan de cuentas y estados financieros", link: "/dashboard/contabilidad" },
-              { emoji:"BNC", name:"Bancos",           desc:"Reconciliacion bancaria", link: "/dashboard/bancos" },
-              { emoji:"HR",  name:"Recursos Humanos", desc:"Empleados, nomina, TSS", link: "/dashboard/hr" },
-              { emoji:"CRM", name:"CRM",              desc:"Pipeline de ventas", link: "/dashboard/crm" },
-              { emoji:"BI",  name:"Business Intel",   desc:"Graficos y KPIs en tiempo real", link: "/dashboard/bi" },
-              { emoji:"FX",  name:"Tasas de Cambio",  desc:"Multi-moneda y tasas", link: "/dashboard/monedas" },
-              { emoji:"AI",  name:"AI Agent",         desc:"Analisis inteligente", link: "/dashboard/ai" },
-              { emoji:"CFG", name:"Configuracion",    desc:"Negocio, usuarios, sucursales", link: "/dashboard/settings" },
-            ].map((m,i) => (
-              <div className="menu-item" key={i} onClick={() => window.location.href = m.link}>
-                <div className="menu-emoji">{m.emoji}</div>
-                <div className="menu-name">{m.name}</div>
-                <div className="menu-desc">{m.desc}</div>
-              </div>
-            ))}
+        {/* Charts */}
+        {loading ? (
+          <div className="charts-grid">
+            <div className="sk-card"><div className="skeleton sk-chart" /></div>
+            <div className="sk-card"><div className="skeleton sk-chart" /></div>
           </div>
-        </main>
+        ) : (
+          <div className="charts-grid">
+            <div className="chart-card">
+              <div className="chart-title">Ventas ultimos 30 dias</div>
+              <ResponsiveContainer width="100%" height={280}>
+                <AreaChart data={ventasDiarias}>
+                  <defs>
+                    <linearGradient id="areaGradient" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor={tema.accent} stopOpacity={0.3} />
+                      <stop offset="95%" stopColor={tema.accent} stopOpacity={0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke={tema.borde} />
+                  <XAxis dataKey="fecha" stroke={tema.subtexto} fontSize={10} tickLine={false} />
+                  <YAxis stroke={tema.subtexto} fontSize={10} tickLine={false} tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} />
+                  <Tooltip
+                    contentStyle={{ background: esClaro ? "#fff" : "#0d1829", border: `1px solid ${tema.borde}`, borderRadius: 10, fontSize: 12, color: tema.texto }}
+                    formatter={(value) => [formatCurrency(Number(value)), "Ventas"]}
+                  />
+                  <Area type="monotone" dataKey="ventas" stroke={tema.accent} strokeWidth={2} fill="url(#areaGradient)" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div className="chart-card">
+              <div className="chart-title">Ventas por categoria</div>
+              <ResponsiveContainer width="100%" height={250}>
+                <PieChart>
+                  <Pie data={categorias} cx="50%" cy="50%" innerRadius={60} outerRadius={95} paddingAngle={3} dataKey="value">
+                    {categorias.map((_, index) => (
+                      <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    contentStyle={{ background: esClaro ? "#fff" : "#0d1829", border: `1px solid ${tema.borde}`, borderRadius: 10, fontSize: 12, color: tema.texto }}
+                    formatter={(value) => [`${value}%`, ""]}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="pie-legend">
+                {categorias.map((c, i) => (
+                  <div key={c.name} className="pie-legend-item">
+                    <div className="pie-legend-dot" style={{ background: PIE_COLORS[i] }} />
+                    {c.name} ({c.value}%)
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Alerts */}
+        <div className="section-title">Alertas</div>
+        <div className="alerts-grid">
+          {alertas.map(a => (
+            <div key={a.tipo} className="alert-card" style={{ background: a.bg, border: `1px solid ${a.border}` }}>
+              <div className="alert-icon" style={{ background: `${a.color}20`, color: a.color }}>!</div>
+              <div>
+                <div className="alert-count" style={{ color: a.color }}>{a.count}</div>
+                <div className="alert-label" style={{ color: a.color }}>{a.label}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Module Menu */}
+        <div className="section-title">Modulos del sistema</div>
+        <div className="menu-grid">
+          {[
+            { emoji: "POS", name: "Punto de Venta", desc: "Registrar ventas", link: "/dashboard/pos" },
+            { emoji: "INV", name: "Inventario", desc: "Productos y stock", link: "/dashboard/productos" },
+            { emoji: "CLI", name: "Clientes", desc: "Gestion de clientes", link: "/dashboard/clientes" },
+            { emoji: "PRV", name: "Proveedores", desc: "Gestion de compras", link: "/dashboard/proveedores" },
+            { emoji: "COT", name: "Cotizaciones", desc: "Presupuestos", link: "/dashboard/cotizaciones" },
+            { emoji: "OC", name: "Ordenes Compra", desc: "Con aprobacion", link: "/dashboard/ordenes-compra" },
+            { emoji: "CMP", name: "Compras", desc: "Compras y retenciones", link: "/dashboard/compras" },
+            { emoji: "FAC", name: "Facturacion", desc: "Historial y e-CF", link: "/dashboard/ventas" },
+            { emoji: "CxC", name: "Cuentas x Cobrar", desc: "Cobranzas y aging", link: "/dashboard/cxc" },
+            { emoji: "CxP", name: "Cuentas x Pagar", desc: "Pagos pendientes", link: "/dashboard/cxp" },
+            { emoji: "CAJ", name: "Cuadres de Caja", desc: "Apertura y cierre", link: "/dashboard/cuadres" },
+            { emoji: "RPT", name: "Reportes", desc: "Fiscales 606/607/608", link: "/dashboard/reportes" },
+            { emoji: "CTB", name: "Contabilidad", desc: "Estados financieros", link: "/dashboard/contabilidad" },
+            { emoji: "BNC", name: "Bancos", desc: "Reconciliacion", link: "/dashboard/bancos" },
+            { emoji: "HR", name: "RRHH", desc: "Nomina y TSS", link: "/dashboard/hr" },
+            { emoji: "CRM", name: "CRM", desc: "Pipeline ventas", link: "/dashboard/crm" },
+            { emoji: "BI", name: "Business Intel", desc: "KPIs en tiempo real", link: "/dashboard/bi" },
+            { emoji: "FX", name: "Tasas Cambio", desc: "Multi-moneda", link: "/dashboard/monedas" },
+            { emoji: "AI", name: "AI Agent", desc: "Analisis inteligente", link: "/dashboard/ai" },
+            { emoji: "CFG", name: "Configuracion", desc: "Negocio y usuarios", link: "/dashboard/settings" },
+          ].map((m, i) => (
+            <div className="menu-item" key={i} onClick={() => window.location.href = m.link}>
+              <div className="menu-emoji">{m.emoji}</div>
+              <div className="menu-name">{m.name}</div>
+              <div className="menu-desc">{m.desc}</div>
+            </div>
+          ))}
+        </div>
       </div>
     </>
   );

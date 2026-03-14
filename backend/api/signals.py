@@ -1,7 +1,10 @@
 import logging
 from django.db.models.signals import pre_save, post_save
 from django.dispatch import receiver
-from .models import Venta, Compra, Producto, FacturaElectronica, AuditLog
+from .models import (
+    Venta, Compra, Producto, FacturaElectronica, AuditLog,
+    Usuario, CuadreCaja, AlertaSeguridad,
+)
 
 logger = logging.getLogger('audit')
 
@@ -68,6 +71,37 @@ def audit_venta_create(sender, instance, created, **kwargs):
             except Exception as e:
                 logger.error('Error creando asiento para venta nueva %s: %s', instance.numero, e)
 
+        # Check if transaction requires double confirmation
+        try:
+            negocio = instance.negocio
+            umbral = negocio.umbral_confirmacion
+            if instance.total and instance.total >= umbral:
+                from datetime import timedelta
+                from django.utils import timezone
+                from .models import ConfirmacionTransaccion
+                ConfirmacionTransaccion.objects.create(
+                    negocio=negocio,
+                    tipo='VENTA',
+                    objeto_id=str(instance.pk),
+                    monto=instance.total,
+                    solicitado_por=instance.cajero,
+                    expira_en=timezone.now() + timedelta(hours=24),
+                )
+                AlertaSeguridad.objects.create(
+                    negocio=negocio,
+                    tipo='TRANSACCION_ALTA',
+                    severidad='MEDIA',
+                    titulo=f'Transaccion alta: ${instance.total}',
+                    descripcion=(
+                        f'Venta {instance.numero} por ${instance.total} '
+                        f'requiere doble confirmacion (umbral: ${umbral})'
+                    ),
+                    usuario=instance.cajero,
+                    datos={'venta_id': str(instance.pk), 'total': str(instance.total)},
+                )
+        except Exception as e:
+            logger.error('Error checking double confirmation: %s', e)
+
 
 @receiver(post_save, sender=FacturaElectronica)
 def audit_ecf_create(sender, instance, created, **kwargs):
@@ -131,3 +165,72 @@ def auto_asiento_compra(sender, instance, **kwargs):
             crear_asiento_compra(instance)
         except Exception as e:
             logger.error('Error creando asiento para compra %s: %s', instance.numero, e)
+
+
+# =============================================================================
+# SECURITY SIGNALS
+# =============================================================================
+
+@receiver(pre_save, sender=Usuario)
+def detect_role_change(sender, instance, **kwargs):
+    """Alert on role changes, especially to admin roles."""
+    if not instance.pk:
+        return
+    try:
+        old = Usuario.objects.get(pk=instance.pk)
+    except Usuario.DoesNotExist:
+        return
+
+    if old.rol != instance.rol and instance.negocio_id:
+        AuditLog.objects.create(
+            negocio_id=instance.negocio_id,
+            usuario=None,
+            accion='ROLE_CHANGE',
+            modelo='Usuario',
+            objeto_id=str(instance.pk),
+            descripcion=f'Rol cambiado de {old.rol} a {instance.rol} para {instance.username}',
+            datos_anteriores={'rol': old.rol},
+            datos_nuevos={'rol': instance.rol},
+        )
+
+        # Alert on promotion to admin roles
+        admin_roles = ('SUPER_ADMIN', 'ADMIN_NEGOCIO')
+        if instance.rol in admin_roles and old.rol not in admin_roles:
+            AlertaSeguridad.objects.create(
+                negocio_id=instance.negocio_id,
+                tipo='CAMBIO_ROL',
+                severidad='ALTA',
+                titulo=f'Nuevo administrador: {instance.username}',
+                descripcion=f'Rol cambiado de {old.rol} a {instance.rol}',
+                usuario=instance,
+                datos={
+                    'rol_anterior': old.rol,
+                    'rol_nuevo': instance.rol,
+                    'usuario_id': str(instance.pk),
+                },
+            )
+
+
+@receiver(post_save, sender=CuadreCaja)
+def detect_cash_discrepancy(sender, instance, created, **kwargs):
+    """Detect and alert on cash discrepancies > 1%."""
+    if not created:
+        return
+    if not instance.negocio_id:
+        return
+
+    negocio_id = instance.negocio_id
+    if hasattr(instance, 'cajero') and instance.cajero and instance.cajero.negocio_id:
+        negocio_id = instance.cajero.negocio_id
+
+    from api.security.anomaly_detector import detect_cash_discrepancy
+    alerts = detect_cash_discrepancy(instance)
+    for alert in alerts:
+        AlertaSeguridad.objects.create(
+            negocio_id=negocio_id,
+            tipo='DESCUADRE',
+            severidad='ALTA',
+            titulo=f'Descuadre de caja: ${instance.diferencia}',
+            descripcion=alert['descripcion'],
+            datos=alert,
+        )

@@ -3,9 +3,13 @@ import path from "path";
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // Disable source maps in production (code protection)
+  productionBrowserSourceMaps: false,
   turbopack: {
     root: path.resolve(__dirname),
   },
+  // Expose only NEXT_PUBLIC_ variables to the client
+  serverExternalPackages: [],
   async headers() {
     return [
       {

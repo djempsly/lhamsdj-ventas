@@ -40,6 +40,7 @@ class NegocioFactory(DjangoModelFactory):
     pais = factory.SubFactory(PaisFactory)
     moneda_principal = factory.SubFactory(MonedaFactory)
     tipo_licencia = 'MENSUAL'
+    fecha_vencimiento = factory.LazyFunction(lambda: timezone.now() + timezone.timedelta(days=365))
     estado_licencia = 'ACTIVA'
     max_usuarios = 10
     max_sucursales = 5
