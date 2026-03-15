@@ -14,6 +14,10 @@ from .models import (
     EtapaCRM, Oportunidad, ActividadCRM, TasaCambio,
     SesionActiva, ApiKey, IPBloqueada, AlertaSeguridad,
     ConfirmacionTransaccion, TokenPago, LicenciaSistema, BackupRegistro,
+    CategoriaActivo, ActivoFijo, DepreciacionMensual, BajaActivo,
+    WorkflowConfig, WorkflowStep, SolicitudAprobacion, DecisionAprobacion,
+    Presupuesto, LineaPresupuesto,
+    ArchivoImportacionBancaria, TransaccionBancaria,
 )
 
 
@@ -763,3 +767,236 @@ class DetalleVentaSecureWriteSerializer(serializers.Serializer):
                     })
 
         return attrs
+
+
+# =============================================================================
+# ACTIVOS FIJOS
+# =============================================================================
+
+class CategoriaActivoSerializer(serializers.ModelSerializer):
+    cuenta_activo_nombre = serializers.CharField(source='cuenta_activo_default.nombre', read_only=True)
+    cuenta_depreciacion_nombre = serializers.CharField(source='cuenta_depreciacion_default.nombre', read_only=True)
+    cuenta_gasto_nombre = serializers.CharField(source='cuenta_gasto_default.nombre', read_only=True)
+
+    class Meta:
+        model = CategoriaActivo
+        fields = [
+            'id', 'nombre', 'vida_util_default', 'metodo_default',
+            'cuenta_activo_default', 'cuenta_activo_nombre',
+            'cuenta_depreciacion_default', 'cuenta_depreciacion_nombre',
+            'cuenta_gasto_default', 'cuenta_gasto_nombre',
+        ]
+
+
+class DepreciacionMensualSerializer(serializers.ModelSerializer):
+    periodo_nombre = serializers.CharField(source='periodo.nombre', read_only=True)
+
+    class Meta:
+        model = DepreciacionMensual
+        fields = [
+            'id', 'activo', 'periodo', 'periodo_nombre', 'fecha',
+            'monto_depreciacion', 'depreciacion_acumulada', 'valor_en_libros',
+            'asiento_contable', 'creado_en',
+        ]
+        read_only_fields = ['id', 'creado_en']
+
+
+class BajaActivoSerializer(serializers.ModelSerializer):
+    autorizado_por_nombre = serializers.CharField(source='autorizado_por.get_full_name', read_only=True)
+
+    class Meta:
+        model = BajaActivo
+        fields = [
+            'id', 'activo', 'fecha_baja', 'motivo', 'valor_venta',
+            'ganancia_perdida', 'asiento_contable', 'autorizado_por',
+            'autorizado_por_nombre', 'notas', 'creado_en',
+        ]
+        read_only_fields = ['id', 'ganancia_perdida', 'asiento_contable', 'creado_en']
+
+
+class ActivoFijoSerializer(serializers.ModelSerializer):
+    categoria_nombre = serializers.CharField(source='categoria.nombre', read_only=True)
+    ubicacion_nombre = serializers.CharField(source='ubicacion.nombre', read_only=True, default=None)
+    responsable_nombre = serializers.CharField(source='responsable.get_full_name', read_only=True, default=None)
+    proveedor_nombre = serializers.CharField(source='proveedor.nombre', read_only=True, default=None)
+    depreciacion_acumulada = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    valor_en_libros = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    base_depreciable = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    depreciaciones = DepreciacionMensualSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = ActivoFijo
+        fields = [
+            'id', 'codigo', 'nombre', 'descripcion', 'categoria', 'categoria_nombre',
+            'cuenta_contable', 'cuenta_depreciacion', 'cuenta_gasto',
+            'fecha_adquisicion', 'fecha_inicio_depreciacion',
+            'costo_adquisicion', 'valor_residual', 'vida_util_meses',
+            'metodo_depreciacion', 'estado',
+            'ubicacion', 'ubicacion_nombre', 'responsable', 'responsable_nombre',
+            'numero_serie', 'proveedor', 'proveedor_nombre', 'factura_compra', 'foto',
+            'base_depreciable', 'depreciacion_acumulada', 'valor_en_libros',
+            'depreciaciones', 'creado_en', 'actualizado_en',
+        ]
+        read_only_fields = ['id', 'codigo', 'creado_en', 'actualizado_en']
+
+    def validate(self, attrs):
+        if attrs.get('valor_residual', 0) >= attrs.get('costo_adquisicion', 0):
+            raise serializers.ValidationError({
+                'valor_residual': 'El valor residual debe ser menor al costo de adquisición.',
+            })
+        return attrs
+
+
+class ActivoFijoListSerializer(serializers.ModelSerializer):
+    """Serializer ligero para listados"""
+    categoria_nombre = serializers.CharField(source='categoria.nombre', read_only=True)
+    ubicacion_nombre = serializers.CharField(source='ubicacion.nombre', read_only=True, default=None)
+    depreciacion_acumulada = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+    valor_en_libros = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = ActivoFijo
+        fields = [
+            'id', 'codigo', 'nombre', 'categoria', 'categoria_nombre',
+            'costo_adquisicion', 'estado', 'ubicacion_nombre',
+            'depreciacion_acumulada', 'valor_en_libros', 'creado_en',
+        ]
+
+
+# =============================================================================
+# WORKFLOW DE APROBACIONES
+# =============================================================================
+
+class WorkflowStepSerializer(serializers.ModelSerializer):
+    usuario_especifico_nombre = serializers.CharField(
+        source='usuario_especifico.get_full_name', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = WorkflowStep
+        fields = [
+            'id', 'orden', 'nombre', 'rol_aprobador',
+            'usuario_especifico', 'usuario_especifico_nombre',
+            'monto_minimo', 'monto_maximo', 'auto_aprobar_bajo_monto',
+            'timeout_horas', 'notificar_por',
+        ]
+
+
+class WorkflowConfigSerializer(serializers.ModelSerializer):
+    pasos = WorkflowStepSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = WorkflowConfig
+        fields = [
+            'id', 'nombre', 'entidad', 'activo', 'pasos',
+            'creado_en', 'actualizado_en',
+        ]
+        read_only_fields = ['id', 'creado_en', 'actualizado_en']
+
+
+class DecisionAprobacionSerializer(serializers.ModelSerializer):
+    aprobador_nombre = serializers.CharField(source='aprobador.get_full_name', read_only=True)
+    paso_nombre = serializers.CharField(source='paso.nombre', read_only=True)
+
+    class Meta:
+        model = DecisionAprobacion
+        fields = [
+            'id', 'paso', 'paso_nombre', 'aprobador', 'aprobador_nombre',
+            'decision', 'comentario', 'fecha_decision',
+        ]
+        read_only_fields = ['id', 'fecha_decision']
+
+
+class SolicitudAprobacionSerializer(serializers.ModelSerializer):
+    workflow_nombre = serializers.CharField(source='workflow.nombre', read_only=True)
+    solicitante_nombre = serializers.CharField(source='solicitante.get_full_name', read_only=True)
+    paso_actual_nombre = serializers.CharField(source='paso_actual.nombre', read_only=True, default=None)
+    decisiones = DecisionAprobacionSerializer(many=True, read_only=True)
+
+    class Meta:
+        model = SolicitudAprobacion
+        fields = [
+            'id', 'workflow', 'workflow_nombre',
+            'content_type', 'object_id',
+            'solicitante', 'solicitante_nombre',
+            'paso_actual', 'paso_actual_nombre',
+            'estado', 'monto', 'decisiones',
+            'creado_en', 'actualizado_en',
+        ]
+        read_only_fields = ['id', 'estado', 'creado_en', 'actualizado_en']
+
+
+# =============================================================================
+# PRESUPUESTOS
+# =============================================================================
+
+class LineaPresupuestoSerializer(serializers.ModelSerializer):
+    cuenta_nombre = serializers.CharField(source='cuenta_contable.nombre', read_only=True)
+    cuenta_codigo = serializers.CharField(source='cuenta_contable.codigo', read_only=True)
+
+    class Meta:
+        model = LineaPresupuesto
+        fields = [
+            'id', 'cuenta_contable', 'cuenta_nombre', 'cuenta_codigo',
+            'mes_01', 'mes_02', 'mes_03', 'mes_04', 'mes_05', 'mes_06',
+            'mes_07', 'mes_08', 'mes_09', 'mes_10', 'mes_11', 'mes_12',
+            'total_anual', 'notas',
+        ]
+        read_only_fields = ['id', 'total_anual']
+
+
+class PresupuestoSerializer(serializers.ModelSerializer):
+    lineas = LineaPresupuestoSerializer(many=True, read_only=True)
+    total_presupuestado = serializers.DecimalField(
+        max_digits=14, decimal_places=2, read_only=True,
+    )
+    departamento_nombre = serializers.CharField(
+        source='departamento.nombre', read_only=True, default=None,
+    )
+    periodo_nombre = serializers.CharField(source='periodo.nombre', read_only=True)
+
+    class Meta:
+        model = Presupuesto
+        fields = [
+            'id', 'nombre', 'periodo', 'periodo_nombre',
+            'departamento', 'departamento_nombre',
+            'estado', 'created_by', 'aprobado_por', 'fecha_aprobacion',
+            'notas', 'total_presupuestado', 'lineas',
+            'creado_en', 'actualizado_en',
+        ]
+        read_only_fields = ['id', 'created_by', 'aprobado_por', 'fecha_aprobacion', 'creado_en', 'actualizado_en']
+
+
+# =============================================================================
+# CONCILIACIÓN BANCARIA
+# =============================================================================
+
+class TransaccionBancariaSerializer(serializers.ModelSerializer):
+    movimiento_match_desc = serializers.CharField(
+        source='movimiento_match.descripcion', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = TransaccionBancaria
+        fields = [
+            'id', 'cuenta_bancaria', 'importacion', 'fecha', 'descripcion',
+            'referencia', 'monto', 'saldo', 'estado',
+            'movimiento_match', 'movimiento_match_desc', 'confianza_match',
+            'conciliada_por', 'fecha_conciliacion', 'notas', 'creado_en',
+        ]
+        read_only_fields = ['id', 'creado_en']
+
+
+class ArchivoImportacionBancariaSerializer(serializers.ModelSerializer):
+    importado_por_nombre = serializers.CharField(
+        source='importado_por.get_full_name', read_only=True, default=None,
+    )
+
+    class Meta:
+        model = ArchivoImportacionBancaria
+        fields = [
+            'id', 'cuenta_bancaria', 'archivo_nombre', 'formato',
+            'fecha_importacion', 'registros_importados', 'registros_conciliados',
+            'importado_por', 'importado_por_nombre',
+        ]
+        read_only_fields = ['id', 'fecha_importacion', 'registros_importados', 'registros_conciliados']

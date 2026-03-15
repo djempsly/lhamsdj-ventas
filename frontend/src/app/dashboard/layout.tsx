@@ -72,7 +72,12 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
     { key: "crm",    label: i18n.dashboard.menuCrm,           icon: "CRM", href: "/dashboard/crm" },
     { key: "bi",     label: i18n.dashboard.menuBi,            icon: "BI",  href: "/dashboard/bi" },
     { key: "fx",     label: i18n.dashboard.menuExchangeRates, icon: "FX",  href: "/dashboard/monedas" },
+    { key: "act",    label: i18n.dashboard.menuFixedAssets,    icon: "ACT", href: "/dashboard/activos" },
+    { key: "apr",    label: i18n.dashboard.menuApprovals,     icon: "APR", href: "/dashboard/aprobaciones" },
+    { key: "prs",    label: i18n.dashboard.menuBudgets,       icon: "PRS", href: "/dashboard/presupuestos" },
+    { key: "rec",    label: i18n.dashboard.menuReconciliation,icon: "REC", href: "/dashboard/conciliacion" },
     { key: "ai",     label: i18n.dashboard.menuAi,            icon: "AI",  href: "/dashboard/ai" },
+    { key: "svc",    label: i18n.dashboard.menuServices,      icon: "SVC", href: "/dashboard/servicios" },
     { key: "cfg",    label: i18n.dashboard.menuSettings,      icon: "CFG", href: "/dashboard/settings" },
   ];
 

@@ -60,3 +60,9 @@ pytest-asyncio==0.24.0
 # Channels (WebSockets)
 channels[daphne]==4.1.0
 channels-redis==4.2.0
+
+# Bank Reconciliation
+ofxparse==0.21
+
+# Circuit Breakers
+pybreaker==1.2.0

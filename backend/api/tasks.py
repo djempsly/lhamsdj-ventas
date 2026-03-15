@@ -261,3 +261,141 @@ def limpiar_ips_expiradas():
     if count:
         logger.info('Limpiadas %d IPs bloqueadas expiradas', count)
     return {'cleaned': count}
+
+
+# =============================================================================
+# DEPRECIATION TASKS
+# =============================================================================
+
+@shared_task
+def calcular_depreciacion_mensual(negocio_id=None, mes=None):
+    """
+    Calculate monthly depreciation for all active fixed assets.
+    Called by Celery beat on the 1st of each month.
+    """
+    from api.models import (
+        Negocio, ActivoFijo, PeriodoContable, DepreciacionMensual,
+        AsientoContable, LineaAsiento,
+    )
+    from django.db import transaction
+    from datetime import date
+
+    if mes:
+        year, month = mes.split('-')
+        year, month = int(year), int(month)
+    else:
+        today = timezone.now().date()
+        # Depreciate the previous month
+        if today.month == 1:
+            year, month = today.year - 1, 12
+        else:
+            year, month = today.year, today.month - 1
+
+    fecha_ref = date(year, month, 1)
+    negocios = Negocio.objects.filter(estado_licencia='ACTIVA')
+    if negocio_id:
+        negocios = negocios.filter(id=negocio_id)
+
+    total = 0
+    for negocio in negocios:
+        periodo = PeriodoContable.objects.filter(
+            negocio=negocio, estado='ABIERTO',
+            fecha_inicio__lte=fecha_ref, fecha_fin__gte=fecha_ref,
+        ).first()
+        if not periodo:
+            continue
+
+        activos = ActivoFijo.objects.filter(
+            negocio=negocio, estado='ACTIVO',
+        ).exclude(depreciaciones__periodo=periodo)
+
+        for activo in activos:
+            dep_acum = activo.depreciacion_acumulada
+            base = activo.base_depreciable
+            if dep_acum >= base:
+                activo.estado = 'DEPRECIADO_TOTAL'
+                activo.save(update_fields=['estado'])
+                continue
+
+            monto = activo.depreciacion_mensual_lineal
+            if dep_acum + monto > base:
+                monto = base - dep_acum
+
+            nueva_acum = dep_acum + monto
+            valor_libros = activo.costo_adquisicion - nueva_acum
+
+            try:
+                with transaction.atomic():
+                    asiento = AsientoContable.objects.create(
+                        negocio=negocio, periodo=periodo,
+                        fecha=periodo.fecha_fin, tipo='AUTOMATICO',
+                        descripcion=f'Depreciación {activo.codigo} - {year}-{month:02d}',
+                        estado='APROBADO',
+                        total_debe=monto, total_haber=monto,
+                    )
+                    LineaAsiento.objects.create(
+                        asiento=asiento, cuenta=activo.cuenta_gasto,
+                        descripcion=f'Gasto depreciación {activo.codigo}',
+                        debe=monto, haber=0,
+                    )
+                    LineaAsiento.objects.create(
+                        asiento=asiento, cuenta=activo.cuenta_depreciacion,
+                        descripcion=f'Depreciación acumulada {activo.codigo}',
+                        debe=0, haber=monto,
+                    )
+                    DepreciacionMensual.objects.create(
+                        activo=activo, periodo=periodo,
+                        fecha=periodo.fecha_fin,
+                        monto_depreciacion=monto,
+                        depreciacion_acumulada=nueva_acum,
+                        valor_en_libros=valor_libros,
+                        asiento_contable=asiento,
+                    )
+                    if nueva_acum >= base:
+                        activo.estado = 'DEPRECIADO_TOTAL'
+                        activo.save(update_fields=['estado'])
+                    total += 1
+            except Exception as e:
+                logger.error('Error depreciando %s: %s', activo.codigo, e)
+
+    logger.info('Depreciación mensual completada: %d activos procesados', total)
+    return {'processed': total}
+
+
+# =============================================================================
+# APPROVAL WORKFLOW TASKS
+# =============================================================================
+
+@shared_task
+def escalar_aprobaciones_timeout():
+    """Escalate approval requests that have exceeded their timeout."""
+    from api.approval_engine import ApprovalEngine
+
+    engine = ApprovalEngine()
+    escalated = engine.escalate_timeouts()
+    logger.info('Escalated %d approval solicitudes', escalated)
+    return {'escalated': escalated}
+
+
+# =============================================================================
+# BANK RECONCILIATION TASKS
+# =============================================================================
+
+@shared_task
+def conciliar_automatico_async(importacion_id):
+    """Run auto-matching on a bank import file asynchronously."""
+    from api.models import ArchivoImportacionBancaria
+    from api.conciliation_engine import ConciliationEngine
+
+    try:
+        importacion = ArchivoImportacionBancaria.objects.get(id=importacion_id)
+        engine = ConciliationEngine()
+        stats = engine.auto_match(importacion)
+        logger.info('Auto-conciliation for %s: %s', importacion_id, stats)
+        return stats
+    except ArchivoImportacionBancaria.DoesNotExist:
+        logger.error('Import file %s not found', importacion_id)
+        return {'error': 'not_found'}
+    except Exception as e:
+        logger.error('Error in auto-conciliation: %s', e)
+        return {'error': str(e)}

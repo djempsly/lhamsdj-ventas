@@ -225,3 +225,128 @@ class CuentaBancariaFactory(DjangoModelFactory):
     moneda = factory.SubFactory(MonedaFactory)
     saldo = Decimal('50000.00')
     activa = True
+
+
+class CategoriaActivoFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.CategoriaActivo'
+
+    negocio = factory.SubFactory(NegocioFactory)
+    nombre = factory.Sequence(lambda n: f'Categoria Activo {n}')
+    vida_util_default = 60
+    metodo_default = 'LINEAL'
+
+
+class ActivoFijoFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.ActivoFijo'
+
+    negocio = factory.SubFactory(NegocioFactory)
+    nombre = factory.Sequence(lambda n: f'Activo Test {n}')
+    categoria = factory.SubFactory(CategoriaActivoFactory, negocio=factory.SelfAttribute('..negocio'))
+    cuenta_contable = factory.SubFactory(CuentaContableFactory, negocio=factory.SelfAttribute('..negocio'))
+    cuenta_depreciacion = factory.SubFactory(CuentaContableFactory, negocio=factory.SelfAttribute('..negocio'))
+    cuenta_gasto = factory.SubFactory(CuentaContableFactory, negocio=factory.SelfAttribute('..negocio'))
+    fecha_adquisicion = factory.LazyFunction(lambda: timezone.now().date())
+    fecha_inicio_depreciacion = factory.LazyFunction(lambda: timezone.now().date())
+    costo_adquisicion = Decimal('120000.00')
+    valor_residual = Decimal('12000.00')
+    vida_util_meses = 60
+    metodo_depreciacion = 'LINEAL'
+    estado = 'ACTIVO'
+
+
+class WorkflowConfigFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.WorkflowConfig'
+
+    negocio = factory.SubFactory(NegocioFactory)
+    nombre = factory.Sequence(lambda n: f'Workflow {n}')
+    entidad = 'ORDEN_COMPRA'
+    activo = True
+
+
+class WorkflowStepFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.WorkflowStep'
+
+    workflow = factory.SubFactory(WorkflowConfigFactory)
+    orden = factory.Sequence(lambda n: n + 1)
+    nombre = factory.Sequence(lambda n: f'Paso {n}')
+    rol_aprobador = 'GERENTE'
+    timeout_horas = 48
+    notificar_por = 'WEBSOCKET'
+
+
+class SolicitudAprobacionFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.SolicitudAprobacion'
+
+    workflow = factory.SubFactory(WorkflowConfigFactory)
+    solicitante = factory.SubFactory(UsuarioFactory, negocio=factory.SelfAttribute('..workflow.negocio'))
+    estado = 'PENDIENTE'
+    monto = Decimal('5000.00')
+
+
+class PresupuestoFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.Presupuesto'
+
+    negocio = factory.SubFactory(NegocioFactory)
+    nombre = factory.Sequence(lambda n: f'Presupuesto {n}')
+    periodo = factory.SubFactory(PeriodoContableFactory, negocio=factory.SelfAttribute('..negocio'))
+    estado = 'BORRADOR'
+    created_by = factory.SubFactory(UsuarioFactory, negocio=factory.SelfAttribute('..negocio'))
+
+
+class LineaPresupuestoFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.LineaPresupuesto'
+
+    presupuesto = factory.SubFactory(PresupuestoFactory)
+    cuenta_contable = factory.SubFactory(
+        CuentaContableFactory,
+        negocio=factory.SelfAttribute('..presupuesto.negocio'),
+    )
+    mes_01 = Decimal('1000.00')
+    mes_02 = Decimal('1000.00')
+    mes_03 = Decimal('1000.00')
+    mes_04 = Decimal('1000.00')
+    mes_05 = Decimal('1000.00')
+    mes_06 = Decimal('1000.00')
+    mes_07 = Decimal('1000.00')
+    mes_08 = Decimal('1000.00')
+    mes_09 = Decimal('1000.00')
+    mes_10 = Decimal('1000.00')
+    mes_11 = Decimal('1000.00')
+    mes_12 = Decimal('1000.00')
+
+
+class ArchivoImportacionBancariaFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.ArchivoImportacionBancaria'
+
+    negocio = factory.SubFactory(NegocioFactory)
+    cuenta_bancaria = factory.SubFactory(CuentaBancariaFactory, negocio=factory.SelfAttribute('..negocio'))
+    archivo_nombre = 'estado_cuenta.ofx'
+    formato = 'OFX'
+    registros_importados = 10
+    importado_por = factory.SubFactory(UsuarioFactory, negocio=factory.SelfAttribute('..negocio'))
+
+
+class TransaccionBancariaFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.TransaccionBancaria'
+
+    negocio = factory.SubFactory(NegocioFactory)
+    cuenta_bancaria = factory.SubFactory(CuentaBancariaFactory, negocio=factory.SelfAttribute('..negocio'))
+    importacion = factory.SubFactory(
+        ArchivoImportacionBancariaFactory,
+        negocio=factory.SelfAttribute('..negocio'),
+        cuenta_bancaria=factory.SelfAttribute('..cuenta_bancaria'),
+    )
+    fecha = factory.LazyFunction(lambda: timezone.now().date())
+    descripcion = factory.Sequence(lambda n: f'Transaccion bancaria {n}')
+    referencia = factory.Sequence(lambda n: f'REF-{n:06d}')
+    monto = Decimal('5000.00')
+    estado = 'PENDIENTE'

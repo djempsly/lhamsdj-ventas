@@ -65,6 +65,21 @@ router.register(r'tasas-cambio', views.TasaCambioViewSet, basename='tasa-cambio'
 # --- Exportaciones (Fase 3D) ---
 router.register(r'export', views.ExportViewSet, basename='export')
 
+# --- Activos Fijos ---
+router.register(r'categorias-activo', views.CategoriaActivoViewSet, basename='categoria-activo')
+router.register(r'activos-fijos', views.ActivoFijoViewSet, basename='activo-fijo')
+
+# --- Workflows de Aprobación ---
+router.register(r'workflows', views.WorkflowConfigViewSet, basename='workflow')
+router.register(r'solicitudes-aprobacion', views.SolicitudAprobacionViewSet, basename='solicitud-aprobacion')
+
+# --- Presupuestos ---
+router.register(r'presupuestos', views.PresupuestoViewSet, basename='presupuesto')
+
+# --- Conciliación Bancaria ---
+router.register(r'importaciones-bancarias', views.ImportacionBancariaViewSet, basename='importacion-bancaria')
+router.register(r'transacciones-bancarias', views.TransaccionBancariaViewSet, basename='transaccion-bancaria')
+
 # --- Seguridad ---
 router.register(r'seguridad/api-keys', views.ApiKeyViewSet, basename='api-key')
 router.register(r'seguridad/alertas', views.AlertaSeguridadViewSet, basename='alerta-seguridad')
@@ -94,6 +109,9 @@ urlpatterns = [
 
     # License
     path('licencia/verificar/', views.LicenciaVerificarView.as_view(), name='licencia-verificar'),
+
+    # Circuit Breakers / Service Health
+    path('health/services/', views.ServiceHealthView.as_view(), name='service-health'),
 
     # Router URLs
     path('', include(router.urls)),

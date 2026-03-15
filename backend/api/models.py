@@ -427,6 +427,7 @@ class AsientoContable(models.Model):
         ('COBRO', 'Cobro'),
         ('AJUSTE', 'Ajuste'),
         ('CIERRE', 'Cierre'),
+        ('AUTOMATICO', 'Automático'),
     ]
     ESTADO = [
         ('BORRADOR', 'Borrador'),
@@ -1966,3 +1967,473 @@ class BackupRegistro(models.Model):
 
     def __str__(self):
         return f"Backup {self.tipo} - {self.creado_en.strftime('%Y-%m-%d')}"
+
+
+# =============================================================================
+# ACTIVOS FIJOS
+# =============================================================================
+
+class CategoriaActivo(models.Model):
+    """Categorías de activos fijos con defaults contables"""
+    METODO_CHOICES = [
+        ('LINEAL', 'Línea Recta'),
+        ('SALDO_DECRECIENTE', 'Saldo Decreciente'),
+        ('UNIDADES_PRODUCCION', 'Unidades de Producción'),
+        ('SUM_DIGITOS', 'Suma de Dígitos'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='categorias_activo')
+    nombre = models.CharField(max_length=100)
+    vida_util_default = models.IntegerField(help_text="Vida útil en meses")
+    metodo_default = models.CharField(max_length=25, choices=METODO_CHOICES, default='LINEAL')
+    cuenta_activo_default = models.ForeignKey(
+        CuentaContable, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cat_activo_fijo',
+    )
+    cuenta_depreciacion_default = models.ForeignKey(
+        CuentaContable, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cat_depreciacion_acum',
+    )
+    cuenta_gasto_default = models.ForeignKey(
+        CuentaContable, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='cat_gasto_depreciacion',
+    )
+
+    class Meta:
+        unique_together = ['negocio', 'nombre']
+        ordering = ['nombre']
+
+    def __str__(self):
+        return self.nombre
+
+
+class ActivoFijo(models.Model):
+    """Activos fijos con depreciación automática"""
+    METODO_CHOICES = CategoriaActivo.METODO_CHOICES
+
+    ESTADO_CHOICES = [
+        ('ACTIVO', 'Activo'),
+        ('DEPRECIADO_TOTAL', 'Depreciado Totalmente'),
+        ('DADO_DE_BAJA', 'Dado de Baja'),
+        ('EN_MANTENIMIENTO', 'En Mantenimiento'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='activos_fijos')
+    codigo = models.CharField(max_length=20)
+    nombre = models.CharField(max_length=200)
+    descripcion = models.TextField(blank=True)
+    categoria = models.ForeignKey(
+        CategoriaActivo, on_delete=models.PROTECT, related_name='activos',
+    )
+
+    # Cuentas contables
+    cuenta_contable = models.ForeignKey(
+        CuentaContable, on_delete=models.PROTECT, related_name='activos_fijos',
+        help_text="Cuenta de activo fijo",
+    )
+    cuenta_depreciacion = models.ForeignKey(
+        CuentaContable, on_delete=models.PROTECT, related_name='activos_depreciacion',
+        help_text="Cuenta de depreciación acumulada",
+    )
+    cuenta_gasto = models.ForeignKey(
+        CuentaContable, on_delete=models.PROTECT, related_name='activos_gasto_dep',
+        help_text="Cuenta de gasto por depreciación",
+    )
+
+    # Valores
+    fecha_adquisicion = models.DateField()
+    fecha_inicio_depreciacion = models.DateField()
+    costo_adquisicion = models.DecimalField(
+        max_digits=12, decimal_places=2,
+        validators=[MinValueValidator(Decimal('0.01'))],
+    )
+    valor_residual = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    vida_util_meses = models.IntegerField(validators=[MinValueValidator(1)])
+    metodo_depreciacion = models.CharField(max_length=25, choices=METODO_CHOICES, default='LINEAL')
+    estado = models.CharField(max_length=20, choices=ESTADO_CHOICES, default='ACTIVO')
+
+    # Ubicación y responsable
+    ubicacion = models.ForeignKey(
+        Sucursal, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='activos_fijos',
+    )
+    responsable = models.ForeignKey(
+        'Usuario', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='activos_asignados',
+    )
+
+    # Trazabilidad
+    numero_serie = models.CharField(max_length=100, blank=True)
+    proveedor = models.ForeignKey(
+        'Proveedor', on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='activos_vendidos',
+    )
+    factura_compra = models.ForeignKey(
+        Compra, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='activos_fijos',
+    )
+    foto = models.ImageField(upload_to='activos_fijos/', blank=True)
+
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['negocio', 'codigo']
+        ordering = ['-creado_en']
+        indexes = [
+            models.Index(fields=['negocio', 'estado']),
+            models.Index(fields=['negocio', 'categoria']),
+        ]
+
+    def __str__(self):
+        return f"{self.codigo} - {self.nombre}"
+
+    @property
+    def base_depreciable(self):
+        return self.costo_adquisicion - self.valor_residual
+
+    @property
+    def depreciacion_mensual_lineal(self):
+        if self.vida_util_meses > 0:
+            return self.base_depreciable / self.vida_util_meses
+        return Decimal('0')
+
+    @property
+    def depreciacion_acumulada(self):
+        total = self.depreciaciones.aggregate(total=Sum('monto_depreciacion'))['total']
+        return total or Decimal('0')
+
+    @property
+    def valor_en_libros(self):
+        return self.costo_adquisicion - self.depreciacion_acumulada
+
+    def save(self, *args, **kwargs):
+        if not self.codigo:
+            last = ActivoFijo.objects.filter(negocio=self.negocio).order_by('-codigo').first()
+            if last and last.codigo.startswith('AF-'):
+                try:
+                    num = int(last.codigo.split('-')[1]) + 1
+                except (ValueError, IndexError):
+                    num = 1
+            else:
+                num = 1
+            self.codigo = f'AF-{num:04d}'
+        super().save(*args, **kwargs)
+
+
+class DepreciacionMensual(models.Model):
+    """Registro mensual de depreciación de activos fijos"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    activo = models.ForeignKey(ActivoFijo, on_delete=models.CASCADE, related_name='depreciaciones')
+    periodo = models.ForeignKey(PeriodoContable, on_delete=models.PROTECT, related_name='depreciaciones')
+    fecha = models.DateField()
+    monto_depreciacion = models.DecimalField(max_digits=12, decimal_places=2)
+    depreciacion_acumulada = models.DecimalField(max_digits=12, decimal_places=2)
+    valor_en_libros = models.DecimalField(max_digits=12, decimal_places=2)
+    asiento_contable = models.ForeignKey(
+        AsientoContable, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='depreciaciones',
+    )
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['activo', 'periodo']
+        ordering = ['fecha']
+
+    def __str__(self):
+        return f"Dep. {self.activo.codigo} - {self.fecha}"
+
+
+class BajaActivo(models.Model):
+    """Registro de baja de activos fijos"""
+    MOTIVO_CHOICES = [
+        ('VENTA', 'Venta'),
+        ('DETERIORO', 'Deterioro'),
+        ('ROBO', 'Robo'),
+        ('OBSOLESCENCIA', 'Obsolescencia'),
+        ('DONACION', 'Donación'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    activo = models.OneToOneField(ActivoFijo, on_delete=models.CASCADE, related_name='baja')
+    fecha_baja = models.DateField()
+    motivo = models.CharField(max_length=20, choices=MOTIVO_CHOICES)
+    valor_venta = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    ganancia_perdida = models.DecimalField(max_digits=12, decimal_places=2)
+    asiento_contable = models.ForeignKey(
+        AsientoContable, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='bajas_activo',
+    )
+    autorizado_por = models.ForeignKey(
+        'Usuario', on_delete=models.PROTECT, related_name='bajas_autorizadas',
+    )
+    notas = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha_baja']
+
+    def __str__(self):
+        return f"Baja {self.activo.codigo} - {self.motivo}"
+
+
+# =============================================================================
+# WORKFLOW DE APROBACIONES
+# =============================================================================
+
+class WorkflowConfig(models.Model):
+    ENTIDAD_CHOICES = [
+        ('ORDEN_COMPRA', 'Orden de Compra'),
+        ('COMPRA', 'Compra'),
+        ('GASTO', 'Gasto'),
+        ('DESCUENTO', 'Descuento'),
+        ('BAJA_ACTIVO', 'Baja de Activo'),
+        ('AJUSTE_INVENTARIO', 'Ajuste de Inventario'),
+        ('NOTA_CREDITO', 'Nota de Crédito'),
+        ('PRESUPUESTO', 'Presupuesto'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='workflows')
+    nombre = models.CharField(max_length=100)
+    entidad = models.CharField(max_length=25, choices=ENTIDAD_CHOICES)
+    activo = models.BooleanField(default=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ['negocio', 'entidad']
+        ordering = ['nombre']
+
+    def __str__(self):
+        return f"{self.nombre} ({self.get_entidad_display()})"
+
+
+class WorkflowStep(models.Model):
+    NOTIFICAR_CHOICES = [
+        ('EMAIL', 'Email'),
+        ('WEBSOCKET', 'WebSocket'),
+        ('AMBOS', 'Ambos'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(WorkflowConfig, on_delete=models.CASCADE, related_name='pasos')
+    orden = models.IntegerField()
+    nombre = models.CharField(max_length=100)
+    rol_aprobador = models.CharField(max_length=20, choices=[
+        ('GERENTE', 'Gerente'),
+        ('ADMIN_NEGOCIO', 'Admin Negocio'),
+        ('CONTADOR', 'Contador'),
+    ])
+    usuario_especifico = models.ForeignKey(
+        Usuario, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='pasos_workflow_asignados',
+    )
+    monto_minimo = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    monto_maximo = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    auto_aprobar_bajo_monto = models.DecimalField(max_digits=12, decimal_places=2, null=True, blank=True)
+    timeout_horas = models.IntegerField(default=48)
+    notificar_por = models.CharField(max_length=10, choices=NOTIFICAR_CHOICES, default='WEBSOCKET')
+
+    class Meta:
+        unique_together = ['workflow', 'orden']
+        ordering = ['workflow', 'orden']
+
+    def __str__(self):
+        return f"{self.workflow.nombre} - Paso {self.orden}: {self.nombre}"
+
+
+class SolicitudAprobacion(models.Model):
+    ESTADO_CHOICES = [
+        ('PENDIENTE', 'Pendiente'),
+        ('APROBADA', 'Aprobada'),
+        ('RECHAZADA', 'Rechazada'),
+        ('CANCELADA', 'Cancelada'),
+        ('ESCALADA', 'Escalada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workflow = models.ForeignKey(WorkflowConfig, on_delete=models.CASCADE, related_name='solicitudes')
+    content_type = models.ForeignKey('contenttypes.ContentType', on_delete=models.CASCADE)
+    object_id = models.UUIDField()
+    solicitante = models.ForeignKey(
+        Usuario, on_delete=models.CASCADE, related_name='solicitudes_creadas',
+    )
+    paso_actual = models.ForeignKey(
+        WorkflowStep, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='solicitudes_en_paso',
+    )
+    estado = models.CharField(max_length=15, choices=ESTADO_CHOICES, default='PENDIENTE')
+    monto = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+        indexes = [
+            models.Index(fields=['content_type', 'object_id']),
+            models.Index(fields=['estado']),
+        ]
+
+    def __str__(self):
+        return f"Solicitud {self.id} - {self.get_estado_display()}"
+
+
+class DecisionAprobacion(models.Model):
+    DECISION_CHOICES = [
+        ('APROBADA', 'Aprobada'),
+        ('RECHAZADA', 'Rechazada'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    solicitud = models.ForeignKey(SolicitudAprobacion, on_delete=models.CASCADE, related_name='decisiones')
+    paso = models.ForeignKey(WorkflowStep, on_delete=models.CASCADE, related_name='decisiones')
+    aprobador = models.ForeignKey(Usuario, on_delete=models.CASCADE, related_name='decisiones_tomadas')
+    decision = models.CharField(max_length=10, choices=DECISION_CHOICES)
+    comentario = models.TextField(blank=True)
+    fecha_decision = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['fecha_decision']
+
+    def __str__(self):
+        return f"{self.get_decision_display()} por {self.aprobador}"
+
+
+# =============================================================================
+# PRESUPUESTOS POR DEPARTAMENTO
+# =============================================================================
+
+class Presupuesto(models.Model):
+    ESTADO_CHOICES = [
+        ('BORRADOR', 'Borrador'),
+        ('PENDIENTE_APROBACION', 'Pendiente de Aprobación'),
+        ('APROBADO', 'Aprobado'),
+        ('CERRADO', 'Cerrado'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='presupuestos')
+    nombre = models.CharField(max_length=200)
+    periodo = models.ForeignKey(PeriodoContable, on_delete=models.PROTECT, related_name='presupuestos')
+    departamento = models.ForeignKey(
+        Departamento, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='presupuestos',
+    )
+    estado = models.CharField(max_length=25, choices=ESTADO_CHOICES, default='BORRADOR')
+    created_by = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, related_name='presupuestos_creados')
+    aprobado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True, related_name='presupuestos_aprobados')
+    fecha_aprobacion = models.DateTimeField(null=True, blank=True)
+    notas = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+    actualizado_en = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ['-creado_en']
+
+    def __str__(self):
+        return self.nombre
+
+    @property
+    def total_presupuestado(self):
+        return self.lineas.aggregate(total=Sum('total_anual'))['total'] or Decimal('0')
+
+
+class LineaPresupuesto(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    presupuesto = models.ForeignKey(Presupuesto, on_delete=models.CASCADE, related_name='lineas')
+    cuenta_contable = models.ForeignKey(CuentaContable, on_delete=models.PROTECT, related_name='lineas_presupuesto')
+    mes_01 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_02 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_03 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_04 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_05 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_06 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_07 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_08 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_09 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_10 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_11 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    mes_12 = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    total_anual = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    notas = models.CharField(max_length=200, blank=True)
+
+    class Meta:
+        unique_together = ['presupuesto', 'cuenta_contable']
+        ordering = ['cuenta_contable__codigo']
+
+    def save(self, *args, **kwargs):
+        self.total_anual = sum(getattr(self, f'mes_{i:02d}') for i in range(1, 13))
+        super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.presupuesto.nombre} - {self.cuenta_contable.nombre}"
+
+
+# =============================================================================
+# CONCILIACIÓN BANCARIA AVANZADA
+# =============================================================================
+
+class ArchivoImportacionBancaria(models.Model):
+    FORMATO_CHOICES = [
+        ('OFX', 'OFX/QFX'),
+        ('MT940', 'MT940/SWIFT'),
+        ('CSV_BANCO', 'CSV Banco'),
+        ('QIF', 'QIF'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='importaciones_bancarias')
+    cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name='importaciones')
+    archivo_nombre = models.CharField(max_length=255)
+    formato = models.CharField(max_length=10, choices=FORMATO_CHOICES)
+    fecha_importacion = models.DateTimeField(auto_now_add=True)
+    registros_importados = models.IntegerField(default=0)
+    registros_conciliados = models.IntegerField(default=0)
+    importado_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True)
+
+    class Meta:
+        ordering = ['-fecha_importacion']
+
+    def __str__(self):
+        return f"{self.archivo_nombre} ({self.formato})"
+
+
+class TransaccionBancaria(models.Model):
+    ESTADO_CHOICES = [
+        ('PENDIENTE', 'Pendiente'),
+        ('CONCILIADA', 'Conciliada'),
+        ('EXCLUIDA', 'Excluida'),
+    ]
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    negocio = models.ForeignKey(Negocio, on_delete=models.CASCADE, related_name='transacciones_bancarias')
+    cuenta_bancaria = models.ForeignKey(CuentaBancaria, on_delete=models.CASCADE, related_name='transacciones_importadas')
+    importacion = models.ForeignKey(ArchivoImportacionBancaria, on_delete=models.CASCADE, related_name='transacciones')
+    fecha = models.DateField()
+    descripcion = models.CharField(max_length=300)
+    referencia = models.CharField(max_length=100, blank=True)
+    monto = models.DecimalField(max_digits=15, decimal_places=2)
+    saldo = models.DecimalField(max_digits=15, decimal_places=2, null=True, blank=True)
+    estado = models.CharField(max_length=12, choices=ESTADO_CHOICES, default='PENDIENTE')
+    movimiento_match = models.ForeignKey(
+        MovimientoBancario, on_delete=models.SET_NULL, null=True, blank=True,
+        related_name='transaccion_match',
+    )
+    confianza_match = models.DecimalField(max_digits=3, decimal_places=2, default=0)
+    conciliada_por = models.ForeignKey(Usuario, on_delete=models.SET_NULL, null=True, blank=True)
+    fecha_conciliacion = models.DateTimeField(null=True, blank=True)
+    notas = models.TextField(blank=True)
+    creado_en = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ['-fecha']
+        indexes = [
+            models.Index(fields=['cuenta_bancaria', 'estado']),
+            models.Index(fields=['cuenta_bancaria', 'fecha']),
+        ]
+
+    def __str__(self):
+        return f"{self.fecha} - {self.descripcion} - {self.monto}"

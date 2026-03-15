@@ -32,6 +32,10 @@ from .models import (
     EtapaCRM, Oportunidad, ActividadCRM, TasaCambio,
     SesionActiva, ApiKey, IPBloqueada, AlertaSeguridad,
     ConfirmacionTransaccion, LicenciaSistema,
+    CategoriaActivo, ActivoFijo, DepreciacionMensual, BajaActivo,
+    WorkflowConfig, WorkflowStep, SolicitudAprobacion, DecisionAprobacion,
+    Presupuesto, LineaPresupuesto,
+    ArchivoImportacionBancaria, TransaccionBancaria,
 )
 from .serializers import (
     PaisSerializer, MonedaSerializer, ImpuestoSerializer, NegocioSerializer, SucursalSerializer,
@@ -50,6 +54,12 @@ from .serializers import (
     IPBloqueadaSerializer, AlertaSeguridadSerializer,
     ConfirmacionTransaccionSerializer, AuditLogSerializer,
     LicenciaSistemaSerializer, BackupRegistroSerializer,
+    CategoriaActivoSerializer, ActivoFijoSerializer, ActivoFijoListSerializer,
+    DepreciacionMensualSerializer, BajaActivoSerializer,
+    WorkflowConfigSerializer, WorkflowStepSerializer,
+    SolicitudAprobacionSerializer, DecisionAprobacionSerializer,
+    PresupuestoSerializer, LineaPresupuestoSerializer,
+    ArchivoImportacionBancariaSerializer, TransaccionBancariaSerializer,
 )
 from .permissions import (
     IsNegocioMember, CanEmitECF, CanViewReports,
@@ -2592,3 +2602,642 @@ class ExportViewSet(viewsets.ViewSet):
         )
         response['Content-Disposition'] = f'attachment; filename="compras_{negocio.identificacion_fiscal}.xlsx"'
         return response
+
+
+# =============================================================================
+# ACTIVOS FIJOS
+# =============================================================================
+
+class CategoriaActivoViewSet(viewsets.ModelViewSet):
+    serializer_class = CategoriaActivoSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        return CategoriaActivo.objects.filter(negocio=self.request.user.negocio)
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+
+class ActivoFijoViewSet(viewsets.ModelViewSet):
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ActivoFijoListSerializer
+        return ActivoFijoSerializer
+
+    def get_queryset(self):
+        qs = ActivoFijo.objects.filter(
+            negocio=self.request.user.negocio,
+        ).select_related('categoria', 'ubicacion', 'responsable', 'proveedor')
+
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+
+        categoria = self.request.query_params.get('categoria')
+        if categoria:
+            qs = qs.filter(categoria_id=categoria)
+
+        q = self.request.query_params.get('q', '').strip()
+        if q:
+            qs = qs.filter(Q(codigo__icontains=q) | Q(nombre__icontains=q) | Q(numero_serie__icontains=q))
+
+        return qs
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=False, methods=['get'])
+    def resumen(self, request):
+        """Dashboard resumen de activos fijos"""
+        qs = self.get_queryset()
+        activos = qs.filter(estado='ACTIVO')
+
+        total_costo = activos.aggregate(t=Sum('costo_adquisicion'))['t'] or 0
+        total_activos = activos.count()
+
+        # Depreciación acumulada total
+        dep_acumulada = DepreciacionMensual.objects.filter(
+            activo__negocio=request.user.negocio,
+            activo__estado='ACTIVO',
+        ).values('activo').annotate(
+            ultima_dep=Sum('monto_depreciacion'),
+        ).aggregate(total=Sum('ultima_dep'))['total'] or 0
+
+        return Response({
+            'total_activos': total_activos,
+            'total_costo_adquisicion': float(total_costo),
+            'total_depreciacion_acumulada': float(dep_acumulada),
+            'valor_neto_libros': float(total_costo - dep_acumulada),
+            'por_estado': {
+                item['estado']: item['count']
+                for item in qs.values('estado').annotate(count=Count('id'))
+            },
+        })
+
+    @action(detail=True, methods=['post'])
+    def depreciar(self, request, pk=None):
+        """Ejecutar depreciación mensual para un activo"""
+        activo = self.get_object()
+
+        if activo.estado != 'ACTIVO':
+            return Response(
+                {'error': 'Solo se pueden depreciar activos con estado ACTIVO.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        periodo_id = request.data.get('periodo')
+        if not periodo_id:
+            return Response(
+                {'error': 'Debe indicar el periodo contable.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            periodo = PeriodoContable.objects.get(pk=periodo_id, negocio=request.user.negocio)
+        except PeriodoContable.DoesNotExist:
+            return Response({'error': 'Periodo no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        if DepreciacionMensual.objects.filter(activo=activo, periodo=periodo).exists():
+            return Response(
+                {'error': 'Ya existe depreciación para este activo en este periodo.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        dep_acum_actual = activo.depreciacion_acumulada
+        base = activo.base_depreciable
+
+        if dep_acum_actual >= base:
+            activo.estado = 'DEPRECIADO_TOTAL'
+            activo.save(update_fields=['estado'])
+            return Response(
+                {'error': 'Activo ya está totalmente depreciado.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        monto = activo.depreciacion_mensual_lineal
+        # No depreciar más allá de la base depreciable
+        if dep_acum_actual + monto > base:
+            monto = base - dep_acum_actual
+
+        nueva_acum = dep_acum_actual + monto
+        valor_libros = activo.costo_adquisicion - nueva_acum
+
+        with transaction.atomic():
+            # Crear asiento contable
+            asiento = AsientoContable.objects.create(
+                negocio=request.user.negocio,
+                periodo=periodo,
+                fecha=periodo.fecha_fin,
+                tipo='AUTOMATICO',
+                descripcion=f'Depreciación {activo.codigo} - {activo.nombre}',
+                estado='APROBADO',
+                total_debe=monto,
+                total_haber=monto,
+            )
+            LineaAsiento.objects.create(
+                asiento=asiento, cuenta=activo.cuenta_gasto,
+                descripcion=f'Gasto depreciación {activo.codigo}',
+                debe=monto, haber=0,
+            )
+            LineaAsiento.objects.create(
+                asiento=asiento, cuenta=activo.cuenta_depreciacion,
+                descripcion=f'Depreciación acumulada {activo.codigo}',
+                debe=0, haber=monto,
+            )
+
+            dep = DepreciacionMensual.objects.create(
+                activo=activo, periodo=periodo,
+                fecha=periodo.fecha_fin,
+                monto_depreciacion=monto,
+                depreciacion_acumulada=nueva_acum,
+                valor_en_libros=valor_libros,
+                asiento_contable=asiento,
+            )
+
+            if nueva_acum >= base:
+                activo.estado = 'DEPRECIADO_TOTAL'
+                activo.save(update_fields=['estado'])
+
+        return Response(DepreciacionMensualSerializer(dep).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def dar_baja(self, request, pk=None):
+        """Dar de baja un activo fijo"""
+        activo = self.get_object()
+
+        if activo.estado == 'DADO_DE_BAJA':
+            return Response(
+                {'error': 'El activo ya está dado de baja.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        motivo = request.data.get('motivo')
+        if motivo not in dict(BajaActivo.MOTIVO_CHOICES):
+            return Response(
+                {'error': 'Motivo de baja inválido.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        valor_venta = Decimal(str(request.data.get('valor_venta', 0) or 0))
+        valor_libros = activo.valor_en_libros
+        ganancia_perdida = valor_venta - valor_libros
+
+        with transaction.atomic():
+            dep_acum = activo.depreciacion_acumulada
+
+            # Asiento de baja
+            asiento = AsientoContable.objects.create(
+                negocio=request.user.negocio,
+                fecha=timezone.now().date(),
+                tipo='AUTOMATICO',
+                descripcion=f'Baja activo {activo.codigo} - {motivo}',
+                estado='APROBADO',
+                total_debe=activo.costo_adquisicion,
+                total_haber=activo.costo_adquisicion,
+            )
+            # Débito: depreciación acumulada (eliminar)
+            LineaAsiento.objects.create(
+                asiento=asiento, cuenta=activo.cuenta_depreciacion,
+                descripcion=f'Reverso dep. acumulada {activo.codigo}',
+                debe=dep_acum, haber=0,
+            )
+            # Crédito: cuenta de activo fijo (eliminar)
+            LineaAsiento.objects.create(
+                asiento=asiento, cuenta=activo.cuenta_contable,
+                descripcion=f'Baja activo {activo.codigo}',
+                debe=0, haber=activo.costo_adquisicion,
+            )
+            # Ganancia/pérdida
+            if ganancia_perdida > 0:
+                LineaAsiento.objects.create(
+                    asiento=asiento, cuenta=activo.cuenta_gasto,
+                    descripcion=f'Ganancia baja {activo.codigo}',
+                    debe=0, haber=ganancia_perdida,
+                )
+            elif ganancia_perdida < 0:
+                LineaAsiento.objects.create(
+                    asiento=asiento, cuenta=activo.cuenta_gasto,
+                    descripcion=f'Pérdida baja {activo.codigo}',
+                    debe=abs(ganancia_perdida), haber=0,
+                )
+            if valor_venta > 0:
+                LineaAsiento.objects.create(
+                    asiento=asiento, cuenta=activo.cuenta_contable,
+                    descripcion=f'Ingreso por venta {activo.codigo}',
+                    debe=valor_venta, haber=0,
+                )
+
+            baja = BajaActivo.objects.create(
+                activo=activo, fecha_baja=timezone.now().date(),
+                motivo=motivo, valor_venta=valor_venta if valor_venta > 0 else None,
+                ganancia_perdida=ganancia_perdida,
+                asiento_contable=asiento, autorizado_por=request.user,
+                notas=request.data.get('notas', ''),
+            )
+            activo.estado = 'DADO_DE_BAJA'
+            activo.save(update_fields=['estado'])
+
+        return Response(BajaActivoSerializer(baja).data, status=status.HTTP_201_CREATED)
+
+    @action(detail=False, methods=['post'])
+    def depreciar_masivo(self, request):
+        """Ejecutar depreciación mensual para todos los activos activos"""
+        periodo_id = request.data.get('periodo')
+        if not periodo_id:
+            return Response(
+                {'error': 'Debe indicar el periodo contable.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            periodo = PeriodoContable.objects.get(pk=periodo_id, negocio=request.user.negocio)
+        except PeriodoContable.DoesNotExist:
+            return Response({'error': 'Periodo no encontrado.'}, status=status.HTTP_404_NOT_FOUND)
+
+        activos = ActivoFijo.objects.filter(
+            negocio=request.user.negocio, estado='ACTIVO',
+        ).exclude(depreciaciones__periodo=periodo)
+
+        resultados = {'depreciados': 0, 'omitidos': 0, 'errores': []}
+
+        for activo in activos:
+            dep_acum = activo.depreciacion_acumulada
+            base = activo.base_depreciable
+
+            if dep_acum >= base:
+                activo.estado = 'DEPRECIADO_TOTAL'
+                activo.save(update_fields=['estado'])
+                resultados['omitidos'] += 1
+                continue
+
+            monto = activo.depreciacion_mensual_lineal
+            if dep_acum + monto > base:
+                monto = base - dep_acum
+
+            nueva_acum = dep_acum + monto
+            valor_libros = activo.costo_adquisicion - nueva_acum
+
+            try:
+                with transaction.atomic():
+                    asiento = AsientoContable.objects.create(
+                        negocio=request.user.negocio,
+                        periodo=periodo,
+                        fecha=periodo.fecha_fin,
+                        tipo='AUTOMATICO',
+                        descripcion=f'Depreciación {activo.codigo} - {activo.nombre}',
+                        estado='APROBADO',
+                        total_debe=monto,
+                        total_haber=monto,
+                    )
+                    LineaAsiento.objects.create(
+                        asiento=asiento, cuenta=activo.cuenta_gasto,
+                        descripcion=f'Gasto depreciación {activo.codigo}',
+                        debe=monto, haber=0,
+                    )
+                    LineaAsiento.objects.create(
+                        asiento=asiento, cuenta=activo.cuenta_depreciacion,
+                        descripcion=f'Depreciación acumulada {activo.codigo}',
+                        debe=0, haber=monto,
+                    )
+
+                    DepreciacionMensual.objects.create(
+                        activo=activo, periodo=periodo,
+                        fecha=periodo.fecha_fin,
+                        monto_depreciacion=monto,
+                        depreciacion_acumulada=nueva_acum,
+                        valor_en_libros=valor_libros,
+                        asiento_contable=asiento,
+                    )
+
+                    if nueva_acum >= base:
+                        activo.estado = 'DEPRECIADO_TOTAL'
+                        activo.save(update_fields=['estado'])
+
+                    resultados['depreciados'] += 1
+            except Exception as e:
+                resultados['errores'].append(f'{activo.codigo}: {str(e)}')
+
+        return Response(resultados)
+
+
+# =============================================================================
+# WORKFLOW DE APROBACIONES
+# =============================================================================
+
+class WorkflowConfigViewSet(viewsets.ModelViewSet):
+    serializer_class = WorkflowConfigSerializer
+    permission_classes = [IsAuthenticated, IsNegocioMember]
+
+    def get_queryset(self):
+        return WorkflowConfig.objects.filter(
+            negocio=self.request.user.negocio,
+        ).prefetch_related('pasos')
+
+    def perform_create(self, serializer):
+        serializer.save(negocio=self.request.user.negocio)
+
+    @action(detail=True, methods=['post'])
+    def agregar_paso(self, request, pk=None):
+        """Add a step to a workflow."""
+        workflow = self.get_object()
+        serializer = WorkflowStepSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(workflow=workflow)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+
+class SolicitudAprobacionViewSet(viewsets.ModelViewSet):
+    serializer_class = SolicitudAprobacionSerializer
+    permission_classes = [IsAuthenticated, IsNegocioMember]
+    http_method_names = ['get', 'head', 'options']
+
+    def get_queryset(self):
+        qs = SolicitudAprobacion.objects.filter(
+            workflow__negocio=self.request.user.negocio,
+        ).select_related('workflow', 'solicitante', 'paso_actual').prefetch_related('decisiones')
+
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+
+        # Filter by pending for current user role
+        mis_pendientes = self.request.query_params.get('mis_pendientes')
+        if mis_pendientes:
+            qs = qs.filter(
+                estado='PENDIENTE',
+                paso_actual__rol_aprobador=self.request.user.rol,
+            )
+
+        return qs
+
+    @action(detail=True, methods=['post'])
+    def aprobar(self, request, pk=None):
+        """Approve the current step."""
+        solicitud = self.get_object()
+        comentario = request.data.get('comentario', '')
+
+        from .approval_engine import ApprovalEngine
+        engine = ApprovalEngine()
+        try:
+            solicitud = engine.decide(solicitud, request.user, 'APROBADA', comentario)
+            return Response(SolicitudAprobacionSerializer(solicitud).data)
+        except (ValueError, PermissionError) as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def rechazar(self, request, pk=None):
+        """Reject the solicitud."""
+        solicitud = self.get_object()
+        comentario = request.data.get('comentario', '')
+
+        if not comentario:
+            return Response(
+                {'error': 'Debe incluir un comentario al rechazar.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        from .approval_engine import ApprovalEngine
+        engine = ApprovalEngine()
+        try:
+            solicitud = engine.decide(solicitud, request.user, 'RECHAZADA', comentario)
+            return Response(SolicitudAprobacionSerializer(solicitud).data)
+        except (ValueError, PermissionError) as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+
+# =============================================================================
+# PRESUPUESTOS
+# =============================================================================
+
+class PresupuestoViewSet(viewsets.ModelViewSet):
+    serializer_class = PresupuestoSerializer
+    permission_classes = [IsAuthenticated, IsNegocioMember]
+
+    def get_queryset(self):
+        return Presupuesto.objects.filter(
+            negocio=self.request.user.negocio,
+        ).select_related('periodo', 'departamento').prefetch_related('lineas')
+
+    def perform_create(self, serializer):
+        serializer.save(
+            negocio=self.request.user.negocio,
+            created_by=self.request.user,
+        )
+
+    @action(detail=True, methods=['post'])
+    def agregar_linea(self, request, pk=None):
+        """Add a budget line."""
+        presupuesto = self.get_object()
+        serializer = LineaPresupuestoSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        serializer.save(presupuesto=presupuesto)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['get'])
+    def ejecucion(self, request, pk=None):
+        """Get budget execution (actual vs. budgeted) for each line."""
+        presupuesto = self.get_object()
+        lineas = presupuesto.lineas.select_related('cuenta_contable').all()
+
+        resultado = []
+        for linea in lineas:
+            # Get actual spending from asientos for this cuenta in the periodo
+            from api.models import LineaAsiento
+            actual = LineaAsiento.objects.filter(
+                cuenta=linea.cuenta_contable,
+                asiento__negocio=request.user.negocio,
+                asiento__periodo=presupuesto.periodo,
+                asiento__estado='CONTABILIZADO',
+            ).aggregate(
+                total_debe=Sum('debe'),
+                total_haber=Sum('haber'),
+            )
+
+            ejecutado = (actual['total_debe'] or 0) - (actual['total_haber'] or 0)
+            presupuestado = linea.total_anual
+
+            porcentaje = 0
+            if presupuestado > 0:
+                porcentaje = round(float(ejecutado) / float(presupuestado) * 100, 2)
+
+            resultado.append({
+                'cuenta': linea.cuenta_contable.codigo,
+                'cuenta_nombre': linea.cuenta_contable.nombre,
+                'presupuestado': str(presupuestado),
+                'ejecutado': str(ejecutado),
+                'disponible': str(presupuestado - ejecutado),
+                'porcentaje': porcentaje,
+                'alerta': porcentaje > 90,
+            })
+
+        return Response({
+            'presupuesto': presupuesto.nombre,
+            'total_presupuestado': str(presupuesto.total_presupuestado),
+            'lineas': resultado,
+        })
+
+    @action(detail=True, methods=['post'])
+    def aprobar(self, request, pk=None):
+        """Approve a budget."""
+        presupuesto = self.get_object()
+        if presupuesto.estado != 'PENDIENTE_APROBACION':
+            return Response(
+                {'error': 'Solo se pueden aprobar presupuestos pendientes.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        presupuesto.estado = 'APROBADO'
+        presupuesto.aprobado_por = request.user
+        presupuesto.fecha_aprobacion = timezone.now()
+        presupuesto.save(update_fields=['estado', 'aprobado_por', 'fecha_aprobacion'])
+        return Response(PresupuestoSerializer(presupuesto).data)
+
+
+# =============================================================================
+# CONCILIACIÓN BANCARIA
+# =============================================================================
+
+class ImportacionBancariaViewSet(viewsets.ModelViewSet):
+    serializer_class = ArchivoImportacionBancariaSerializer
+    permission_classes = [IsAuthenticated, IsNegocioMember]
+
+    def get_queryset(self):
+        return ArchivoImportacionBancaria.objects.filter(
+            negocio=self.request.user.negocio,
+        )
+
+    @action(detail=False, methods=['post'])
+    def importar(self, request):
+        """Import a bank statement file (OFX, MT940, CSV)."""
+        from .parsers import get_parser
+
+        archivo = request.FILES.get('archivo')
+        cuenta_id = request.data.get('cuenta_bancaria')
+        formato = request.data.get('formato', 'OFX')
+
+        if not archivo or not cuenta_id:
+            return Response(
+                {'error': 'Se requiere archivo y cuenta_bancaria.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            cuenta = CuentaBancaria.objects.get(
+                id=cuenta_id, negocio=request.user.negocio,
+            )
+        except CuentaBancaria.DoesNotExist:
+            return Response({'error': 'Cuenta bancaria no encontrada.'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            parser = get_parser(formato)
+            content = archivo.read()
+            parsed_txns = parser.parse(content)
+        except Exception as e:
+            return Response({'error': f'Error parseando archivo: {e}'}, status=status.HTTP_400_BAD_REQUEST)
+
+        importacion = ArchivoImportacionBancaria.objects.create(
+            negocio=request.user.negocio,
+            cuenta_bancaria=cuenta,
+            archivo_nombre=archivo.name,
+            formato=formato,
+            registros_importados=len(parsed_txns),
+            importado_por=request.user,
+        )
+
+        for txn in parsed_txns:
+            TransaccionBancaria.objects.create(
+                negocio=request.user.negocio,
+                cuenta_bancaria=cuenta,
+                importacion=importacion,
+                fecha=txn.fecha,
+                descripcion=txn.descripcion,
+                referencia=txn.referencia,
+                monto=txn.monto,
+                saldo=txn.saldo,
+            )
+
+        # Trigger async auto-matching
+        from .tasks import conciliar_automatico_async
+        conciliar_automatico_async.delay(str(importacion.id))
+
+        return Response(
+            ArchivoImportacionBancariaSerializer(importacion).data,
+            status=status.HTTP_201_CREATED,
+        )
+
+
+class TransaccionBancariaViewSet(viewsets.ModelViewSet):
+    serializer_class = TransaccionBancariaSerializer
+    permission_classes = [IsAuthenticated, IsNegocioMember]
+    http_method_names = ['get', 'patch', 'head', 'options']
+
+    def get_queryset(self):
+        qs = TransaccionBancaria.objects.filter(
+            negocio=self.request.user.negocio,
+        ).select_related('movimiento_match')
+
+        importacion_id = self.request.query_params.get('importacion')
+        if importacion_id:
+            qs = qs.filter(importacion_id=importacion_id)
+
+        estado = self.request.query_params.get('estado')
+        if estado:
+            qs = qs.filter(estado=estado)
+
+        return qs
+
+    @action(detail=True, methods=['post'])
+    def confirmar(self, request, pk=None):
+        """Confirm a suggested match."""
+        from .conciliation_engine import ConciliationEngine
+        txn = self.get_object()
+        engine = ConciliationEngine()
+        try:
+            engine.confirm_match(txn, request.user)
+            return Response(TransaccionBancariaSerializer(txn).data)
+        except ValueError as e:
+            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+
+    @action(detail=True, methods=['post'])
+    def rechazar_match(self, request, pk=None):
+        """Reject a suggested match."""
+        from .conciliation_engine import ConciliationEngine
+        txn = self.get_object()
+        engine = ConciliationEngine()
+        engine.reject_match(txn)
+        return Response(TransaccionBancariaSerializer(txn).data)
+
+    @action(detail=True, methods=['post'])
+    def excluir(self, request, pk=None):
+        """Exclude a transaction from reconciliation."""
+        from .conciliation_engine import ConciliationEngine
+        txn = self.get_object()
+        engine = ConciliationEngine()
+        engine.exclude_transaction(txn, request.user, request.data.get('notas', ''))
+        return Response(TransaccionBancariaSerializer(txn).data)
+
+
+# =============================================================================
+# CIRCUIT BREAKERS HEALTH
+# =============================================================================
+
+class ServiceHealthView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        """Get health status of all external service circuit breakers."""
+        from .circuit_breakers import get_all_status
+        return Response(get_all_status())
+
+    def post(self, request):
+        """Reset a specific circuit breaker."""
+        name = request.data.get('service')
+        if not name:
+            return Response({'error': 'service is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        from .circuit_breakers import reset_breaker
+        if reset_breaker(name):
+            return Response({'status': 'reset', 'service': name})
+        return Response({'error': f'Unknown service: {name}'}, status=status.HTTP_404_NOT_FOUND)
