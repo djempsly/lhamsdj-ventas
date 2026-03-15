@@ -2,7 +2,7 @@ from decimal import Decimal
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
 from .models import (
-    Pais, Moneda, Negocio, Sucursal, Usuario, AuditLog,
+    Pais, Moneda, Impuesto, Negocio, Sucursal, Usuario, AuditLog,
     CuentaContable, PeriodoContable, AsientoContable, LineaAsiento,
     Categoria, Producto, Almacen, StockAlmacen, MovimientoInventario,
     Cliente, Proveedor, SecuenciaNCF, Venta, DetalleVenta,
@@ -20,6 +20,14 @@ from .models import (
 class PaisSerializer(serializers.ModelSerializer):
     class Meta:
         model = Pais
+        fields = '__all__'
+
+
+class ImpuestoSerializer(serializers.ModelSerializer):
+    pais_nombre = serializers.CharField(source='pais.nombre', read_only=True)
+
+    class Meta:
+        model = Impuesto
         fields = '__all__'
 
 

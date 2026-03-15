@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import api from "@/lib/axios";
+import { useI18n } from "@/i18n";
 
 const TEMAS = [
   { nombre: "Oceano",  bg: "#03080f", card: "rgba(255,255,255,0.02)", borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5", subtexto: "#475569", accent: "#0ea5e9", secondary: "#1d4ed8" },
@@ -14,31 +15,8 @@ const TEMAS = [
 
 type Tema = typeof TEMAS[0];
 
-const MENU_ITEMS = [
-  { key: "home",   label: "Dashboard",      icon: "D",   href: "/dashboard" },
-  { key: "pos",    label: "Punto de Venta",  icon: "POS", href: "/dashboard/pos" },
-  { key: "inv",    label: "Inventario",      icon: "INV", href: "/dashboard/productos" },
-  { key: "cli",    label: "Clientes",        icon: "CLI", href: "/dashboard/clientes" },
-  { key: "prv",    label: "Proveedores",     icon: "PRV", href: "/dashboard/proveedores" },
-  { key: "cot",    label: "Cotizaciones",    icon: "COT", href: "/dashboard/cotizaciones" },
-  { key: "oc",     label: "Ordenes Compra",  icon: "OC",  href: "/dashboard/ordenes-compra" },
-  { key: "cmp",    label: "Compras",         icon: "CMP", href: "/dashboard/compras" },
-  { key: "fac",    label: "Facturacion",     icon: "FAC", href: "/dashboard/ventas" },
-  { key: "cxc",    label: "Cuentas x Cobrar",icon: "CxC", href: "/dashboard/cxc" },
-  { key: "cxp",    label: "Cuentas x Pagar", icon: "CxP", href: "/dashboard/cxp" },
-  { key: "caj",    label: "Cuadres de Caja", icon: "CAJ", href: "/dashboard/cuadres" },
-  { key: "rpt",    label: "Reportes",        icon: "RPT", href: "/dashboard/reportes" },
-  { key: "ctb",    label: "Contabilidad",    icon: "CTB", href: "/dashboard/contabilidad" },
-  { key: "bnc",    label: "Bancos",          icon: "BNC", href: "/dashboard/bancos" },
-  { key: "hr",     label: "RRHH",            icon: "HR",  href: "/dashboard/hr" },
-  { key: "crm",    label: "CRM",             icon: "CRM", href: "/dashboard/crm" },
-  { key: "bi",     label: "Business Intel",  icon: "BI",  href: "/dashboard/bi" },
-  { key: "fx",     label: "Tasas Cambio",    icon: "FX",  href: "/dashboard/monedas" },
-  { key: "ai",     label: "AI Agent",        icon: "AI",  href: "/dashboard/ai" },
-  { key: "cfg",    label: "Configuracion",   icon: "CFG", href: "/dashboard/settings" },
-];
-
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
+  const i18n = useI18n();
   const [tema, setTema] = useState<Tema>(TEMAS[0]);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [showTemas, setShowTemas] = useState(false);
@@ -73,6 +51,30 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
   };
 
   const esClaro = tema.nombre === "Claro";
+
+  const MENU_ITEMS = [
+    { key: "home",   label: i18n.nav.dashboard,              icon: "D",   href: "/dashboard" },
+    { key: "pos",    label: i18n.dashboard.menuPos,           icon: "POS", href: "/dashboard/pos" },
+    { key: "inv",    label: i18n.dashboard.menuInventory,     icon: "INV", href: "/dashboard/productos" },
+    { key: "cli",    label: i18n.dashboard.menuClients,       icon: "CLI", href: "/dashboard/clientes" },
+    { key: "prv",    label: i18n.dashboard.menuSuppliers,     icon: "PRV", href: "/dashboard/proveedores" },
+    { key: "cot",    label: i18n.dashboard.menuQuotes,        icon: "COT", href: "/dashboard/cotizaciones" },
+    { key: "oc",     label: i18n.dashboard.menuPurchaseOrders,icon: "OC",  href: "/dashboard/ordenes-compra" },
+    { key: "cmp",    label: i18n.dashboard.menuPurchases,     icon: "CMP", href: "/dashboard/compras" },
+    { key: "fac",    label: i18n.dashboard.menuBilling,       icon: "FAC", href: "/dashboard/ventas" },
+    { key: "cxc",    label: i18n.dashboard.menuReceivables,   icon: "CxC", href: "/dashboard/cxc" },
+    { key: "cxp",    label: i18n.dashboard.menuPayables,      icon: "CxP", href: "/dashboard/cxp" },
+    { key: "caj",    label: i18n.dashboard.menuCashRegister,  icon: "CAJ", href: "/dashboard/cuadres" },
+    { key: "rpt",    label: i18n.dashboard.menuReports,       icon: "RPT", href: "/dashboard/reportes" },
+    { key: "ctb",    label: i18n.dashboard.menuAccounting,    icon: "CTB", href: "/dashboard/contabilidad" },
+    { key: "bnc",    label: i18n.dashboard.menuBanking,       icon: "BNC", href: "/dashboard/bancos" },
+    { key: "hr",     label: i18n.dashboard.menuHr,            icon: "HR",  href: "/dashboard/hr" },
+    { key: "crm",    label: i18n.dashboard.menuCrm,           icon: "CRM", href: "/dashboard/crm" },
+    { key: "bi",     label: i18n.dashboard.menuBi,            icon: "BI",  href: "/dashboard/bi" },
+    { key: "fx",     label: i18n.dashboard.menuExchangeRates, icon: "FX",  href: "/dashboard/monedas" },
+    { key: "ai",     label: i18n.dashboard.menuAi,            icon: "AI",  href: "/dashboard/ai" },
+    { key: "cfg",    label: i18n.dashboard.menuSettings,      icon: "CFG", href: "/dashboard/settings" },
+  ];
 
   if (!mounted) return null;
 
@@ -256,7 +258,7 @@ export default function DashboardLayout({ children }: { children: React.ReactNod
               )}
             </div>
             <button className="btn-logout-sidebar" onClick={cerrarSesion}>
-              Cerrar sesion
+              {i18n.nav.logout}
             </button>
           </div>
         </aside>

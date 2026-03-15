@@ -1,6 +1,8 @@
 import logging
-from django.db.models.signals import pre_save, post_save
+from django.db.models.signals import pre_save, post_save, post_delete
 from django.dispatch import receiver
+from django.core.cache import cache
+from django.utils import timezone as tz_utils
 from .models import (
     Venta, Compra, Producto, FacturaElectronica, AuditLog,
     Usuario, CuadreCaja, AlertaSeguridad,
@@ -234,3 +236,14 @@ def detect_cash_discrepancy(sender, instance, created, **kwargs):
             descripcion=alert['descripcion'],
             datos=alert,
         )
+
+
+# =============================================================================
+# DASHBOARD CACHE INVALIDATION
+# =============================================================================
+
+@receiver([post_save, post_delete], sender=Venta)
+def invalidate_dashboard_cache(sender, instance, **kwargs):
+    hoy = tz_utils.now().date()
+    cache_key = f'dashboard:{instance.negocio_id}:{hoy}'
+    cache.delete(cache_key)

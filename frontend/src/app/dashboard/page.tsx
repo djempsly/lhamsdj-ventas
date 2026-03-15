@@ -2,6 +2,7 @@
 import { useEffect, useState, useMemo } from "react";
 import { posService } from "@/services/fiscal";
 import { formatCurrency } from "@/lib/constants";
+import { useI18n } from "@/i18n";
 import {
   AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell
@@ -27,6 +28,7 @@ interface DashboardStats {
 }
 
 export default function Dashboard() {
+  const i18n = useI18n();
   const [usuario, setUsuario] = useState<{ nombre: string; rol: string } | null>(null);
   const [tema, setTema] = useState(TEMA_DEFAULT);
   const [stats, setStats] = useState<DashboardStats>({
@@ -74,16 +76,16 @@ export default function Dashboard() {
   const pctChange = comp?.porcentaje_cambio || 0;
 
   const kpis = [
-    { icon: "$", value: formatCurrency(stats.total_ventas), label: "Ventas de hoy", change: pctChange },
-    { icon: "#", value: String(stats.cantidad_ventas), label: "Transacciones", change: comp?.transacciones ? ((stats.cantidad_ventas - comp.transacciones) / comp.transacciones * 100) : 0 },
-    { icon: "+", value: stats.total_ganancia !== null ? formatCurrency(stats.total_ganancia) : "---", label: "Ganancia Estimada", change: 0 },
-    { icon: "~", value: formatCurrency(stats.ticket_promedio), label: "Ticket Promedio", change: 0 },
+    { icon: "$", value: formatCurrency(stats.total_ventas), label: i18n.dashboard.salesToday, change: pctChange },
+    { icon: "#", value: String(stats.cantidad_ventas), label: i18n.dashboard.transacciones, change: comp?.transacciones ? ((stats.cantidad_ventas - comp.transacciones) / comp.transacciones * 100) : 0 },
+    { icon: "+", value: stats.total_ganancia !== null ? formatCurrency(stats.total_ganancia) : "---", label: i18n.dashboard.gananciaEstimada, change: 0 },
+    { icon: "~", value: formatCurrency(stats.ticket_promedio), label: i18n.dashboard.ticketPromedio, change: 0 },
   ];
 
   const alertas = [
-    { tipo: "stock", label: "Productos con stock bajo", count: 5, color: "#f59e0b", bg: "rgba(245,158,11,0.08)", border: "rgba(245,158,11,0.15)" },
-    { tipo: "cxc", label: "CxC vencidas", count: 3, color: "#ef4444", bg: "rgba(239,68,68,0.08)", border: "rgba(239,68,68,0.15)" },
-    { tipo: "ncf", label: "NCF por agotarse", count: 2, color: "#3b82f6", bg: "rgba(59,130,246,0.08)", border: "rgba(59,130,246,0.15)" },
+    { tipo: "stock", label: i18n.dashboard.productosStockBajo, count: 5, color: "#f59e0b", bg: "rgba(245,158,11,0.08)", border: "rgba(245,158,11,0.15)" },
+    { tipo: "cxc", label: i18n.dashboard.cxcVencidas, count: 3, color: "#ef4444", bg: "rgba(239,68,68,0.08)", border: "rgba(239,68,68,0.15)" },
+    { tipo: "ncf", label: i18n.dashboard.ncfPorAgotarse, count: 2, color: "#3b82f6", bg: "rgba(59,130,246,0.08)", border: "rgba(59,130,246,0.15)" },
   ];
 
   if (!mounted) return null;
@@ -169,10 +171,10 @@ export default function Dashboard() {
 
       <div className="dash-page">
         <h1 className="welcome-text">
-          Hola, <span>{usuario?.nombre}</span>
+          {i18n.nav.hello}, <span>{usuario?.nombre}</span>
           <span className="rol-badge">{usuario?.rol?.replace("_", " ")}</span>
         </h1>
-        <p className="welcome-sub">Aqui esta el resumen de tu negocio hoy</p>
+        <p className="welcome-sub">{i18n.dashboard.resumenNegocio}</p>
 
         {/* KPI Cards */}
         {loading ? (
@@ -193,7 +195,7 @@ export default function Dashboard() {
                 <div className="stat-value">{s.value}</div>
                 <div className="stat-label">{s.label}</div>
                 <div className={`stat-change ${s.change > 0 ? "up" : s.change < 0 ? "down" : "neutral"}`}>
-                  {s.change > 0 ? `+${s.change.toFixed(1)}%` : s.change < 0 ? `${s.change.toFixed(1)}%` : "Sin cambios"}
+                  {s.change > 0 ? `+${s.change.toFixed(1)}%` : s.change < 0 ? `${s.change.toFixed(1)}%` : i18n.dashboard.sinCambios}
                 </div>
               </div>
             ))}
@@ -209,7 +211,7 @@ export default function Dashboard() {
         ) : (
           <div className="charts-grid">
             <div className="chart-card">
-              <div className="chart-title">Ventas ultimos 30 dias</div>
+              <div className="chart-title">{i18n.dashboard.salesLast30}</div>
               <ResponsiveContainer width="100%" height={280}>
                 <AreaChart data={ventasDiarias}>
                   <defs>
@@ -223,7 +225,7 @@ export default function Dashboard() {
                   <YAxis stroke={tema.subtexto} fontSize={10} tickLine={false} tickFormatter={(v: number) => `$${(v / 1000).toFixed(0)}k`} />
                   <Tooltip
                     contentStyle={{ background: esClaro ? "#fff" : "#0d1829", border: `1px solid ${tema.borde}`, borderRadius: 10, fontSize: 12, color: tema.texto }}
-                    formatter={(value) => [formatCurrency(Number(value)), "Ventas"]}
+                    formatter={(value) => [formatCurrency(Number(value)), i18n.dashboard.salesLabel]}
                   />
                   <Area type="monotone" dataKey="ventas" stroke={tema.accent} strokeWidth={2} fill="url(#areaGradient)" />
                 </AreaChart>
@@ -231,7 +233,7 @@ export default function Dashboard() {
             </div>
 
             <div className="chart-card">
-              <div className="chart-title">Ventas por categoria</div>
+              <div className="chart-title">{i18n.dashboard.salesByCategory}</div>
               <ResponsiveContainer width="100%" height={250}>
                 <PieChart>
                   <Pie data={categorias} cx="50%" cy="50%" innerRadius={60} outerRadius={95} paddingAngle={3} dataKey="value">
@@ -258,7 +260,7 @@ export default function Dashboard() {
         )}
 
         {/* Alerts */}
-        <div className="section-title">Alertas</div>
+        <div className="section-title">{i18n.dashboard.alertas}</div>
         <div className="alerts-grid">
           {alertas.map(a => (
             <div key={a.tipo} className="alert-card" style={{ background: a.bg, border: `1px solid ${a.border}` }}>
@@ -272,29 +274,29 @@ export default function Dashboard() {
         </div>
 
         {/* Module Menu */}
-        <div className="section-title">Modulos del sistema</div>
+        <div className="section-title">{i18n.dashboard.modulosSistema}</div>
         <div className="menu-grid">
           {[
-            { emoji: "POS", name: "Punto de Venta", desc: "Registrar ventas", link: "/dashboard/pos" },
-            { emoji: "INV", name: "Inventario", desc: "Productos y stock", link: "/dashboard/productos" },
-            { emoji: "CLI", name: "Clientes", desc: "Gestion de clientes", link: "/dashboard/clientes" },
-            { emoji: "PRV", name: "Proveedores", desc: "Gestion de compras", link: "/dashboard/proveedores" },
-            { emoji: "COT", name: "Cotizaciones", desc: "Presupuestos", link: "/dashboard/cotizaciones" },
-            { emoji: "OC", name: "Ordenes Compra", desc: "Con aprobacion", link: "/dashboard/ordenes-compra" },
-            { emoji: "CMP", name: "Compras", desc: "Compras y retenciones", link: "/dashboard/compras" },
-            { emoji: "FAC", name: "Facturacion", desc: "Historial y e-CF", link: "/dashboard/ventas" },
-            { emoji: "CxC", name: "Cuentas x Cobrar", desc: "Cobranzas y aging", link: "/dashboard/cxc" },
-            { emoji: "CxP", name: "Cuentas x Pagar", desc: "Pagos pendientes", link: "/dashboard/cxp" },
-            { emoji: "CAJ", name: "Cuadres de Caja", desc: "Apertura y cierre", link: "/dashboard/cuadres" },
-            { emoji: "RPT", name: "Reportes", desc: "Fiscales 606/607/608", link: "/dashboard/reportes" },
-            { emoji: "CTB", name: "Contabilidad", desc: "Estados financieros", link: "/dashboard/contabilidad" },
-            { emoji: "BNC", name: "Bancos", desc: "Reconciliacion", link: "/dashboard/bancos" },
-            { emoji: "HR", name: "RRHH", desc: "Nomina y TSS", link: "/dashboard/hr" },
-            { emoji: "CRM", name: "CRM", desc: "Pipeline ventas", link: "/dashboard/crm" },
-            { emoji: "BI", name: "Business Intel", desc: "KPIs en tiempo real", link: "/dashboard/bi" },
-            { emoji: "FX", name: "Tasas Cambio", desc: "Multi-moneda", link: "/dashboard/monedas" },
-            { emoji: "AI", name: "AI Agent", desc: "Analisis inteligente", link: "/dashboard/ai" },
-            { emoji: "CFG", name: "Configuracion", desc: "Negocio y usuarios", link: "/dashboard/settings" },
+            { emoji: "POS", name: i18n.dashboard.menuPos, desc: i18n.dashboard.menuPosDesc, link: "/dashboard/pos" },
+            { emoji: "INV", name: i18n.dashboard.menuInventory, desc: i18n.dashboard.menuInventoryDesc, link: "/dashboard/productos" },
+            { emoji: "CLI", name: i18n.dashboard.menuClients, desc: i18n.dashboard.menuClientsDesc, link: "/dashboard/clientes" },
+            { emoji: "PRV", name: i18n.dashboard.menuSuppliers, desc: i18n.dashboard.menuSuppliersDesc, link: "/dashboard/proveedores" },
+            { emoji: "COT", name: i18n.dashboard.menuQuotes, desc: i18n.dashboard.menuQuotesDesc, link: "/dashboard/cotizaciones" },
+            { emoji: "OC", name: i18n.dashboard.menuPurchaseOrders, desc: i18n.dashboard.menuPurchaseOrdersDesc, link: "/dashboard/ordenes-compra" },
+            { emoji: "CMP", name: i18n.dashboard.menuPurchases, desc: i18n.dashboard.menuPurchasesDesc, link: "/dashboard/compras" },
+            { emoji: "FAC", name: i18n.dashboard.menuBilling, desc: i18n.dashboard.menuBillingDesc, link: "/dashboard/ventas" },
+            { emoji: "CxC", name: i18n.dashboard.menuReceivables, desc: i18n.dashboard.menuReceivablesDesc, link: "/dashboard/cxc" },
+            { emoji: "CxP", name: i18n.dashboard.menuPayables, desc: i18n.dashboard.menuPayablesDesc, link: "/dashboard/cxp" },
+            { emoji: "CAJ", name: i18n.dashboard.menuCashRegister, desc: i18n.dashboard.menuCashRegisterDesc, link: "/dashboard/cuadres" },
+            { emoji: "RPT", name: i18n.dashboard.menuReports, desc: i18n.dashboard.menuReportsDesc, link: "/dashboard/reportes" },
+            { emoji: "CTB", name: i18n.dashboard.menuAccounting, desc: i18n.dashboard.menuAccountingDesc, link: "/dashboard/contabilidad" },
+            { emoji: "BNC", name: i18n.dashboard.menuBanking, desc: i18n.dashboard.menuBankingDesc, link: "/dashboard/bancos" },
+            { emoji: "HR", name: i18n.dashboard.menuHr, desc: i18n.dashboard.menuHrDesc, link: "/dashboard/hr" },
+            { emoji: "CRM", name: i18n.dashboard.menuCrm, desc: i18n.dashboard.menuCrmDesc, link: "/dashboard/crm" },
+            { emoji: "BI", name: i18n.dashboard.menuBi, desc: i18n.dashboard.menuBiDesc, link: "/dashboard/bi" },
+            { emoji: "FX", name: i18n.dashboard.menuExchangeRates, desc: i18n.dashboard.menuExchangeRatesDesc, link: "/dashboard/monedas" },
+            { emoji: "AI", name: i18n.dashboard.menuAi, desc: i18n.dashboard.menuAiDesc, link: "/dashboard/ai" },
+            { emoji: "CFG", name: i18n.dashboard.menuSettings, desc: i18n.dashboard.menuSettingsDesc, link: "/dashboard/settings" },
           ].map((m, i) => (
             <div className="menu-item" key={i} onClick={() => window.location.href = m.link}>
               <div className="menu-emoji">{m.emoji}</div>

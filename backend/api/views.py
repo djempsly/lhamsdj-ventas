@@ -20,10 +20,10 @@ from django.utils import timezone
 from django.http import HttpResponse
 
 from .models import (
-    Pais, Moneda, Negocio, Sucursal, Usuario, AuditLog,
+    Pais, Moneda, Impuesto, Negocio, Sucursal, Usuario, AuditLog,
     CuentaContable, PeriodoContable, AsientoContable, LineaAsiento,
     Categoria, Producto, Almacen,
-    Cliente, Proveedor, Venta, DetalleVenta, CuadreCaja, AnalisisAI,
+    Cliente, Proveedor, SecuenciaNCF, Venta, DetalleVenta, CuadreCaja, AnalisisAI,
     FacturaElectronica, Compra, DetalleCompra,
     CuentaBancaria, MovimientoBancario, Conciliacion,
     Cotizacion, OrdenCompra,
@@ -34,7 +34,7 @@ from .models import (
     ConfirmacionTransaccion, LicenciaSistema,
 )
 from .serializers import (
-    PaisSerializer, MonedaSerializer, NegocioSerializer, SucursalSerializer,
+    PaisSerializer, MonedaSerializer, ImpuestoSerializer, NegocioSerializer, SucursalSerializer,
     UsuarioSerializer, CuentaContableSerializer, CategoriaSerializer,
     ProductoSerializer, ClienteSerializer, ProveedorSerializer,
     VentaSerializer, DetalleVentaSerializer, CuadreCajaSerializer,
@@ -758,6 +758,73 @@ class SessionListView(APIView):
         )
 
 
+class CountryConfigView(APIView):
+    """GET /api/v1/config/country/ - Returns active country configuration"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        negocio = request.user.negocio
+        if not negocio:
+            return Response({'detail': 'Usuario sin negocio asignado'}, status=400)
+
+        pais = negocio.pais
+        impuestos = Impuesto.objects.filter(pais=pais, activo=True)
+
+        return Response({
+            'pais': {
+                'codigo': pais.codigo,
+                'nombre': pais.nombre,
+                'moneda_codigo': pais.moneda_codigo,
+                'moneda_simbolo': pais.moneda_simbolo,
+                'nombre_impuesto': pais.nombre_impuesto,
+                'tasa_impuesto_defecto': str(pais.tasa_impuesto_defecto),
+                'formato_factura': pais.formato_factura,
+            },
+            'impuestos': ImpuestoSerializer(impuestos, many=True).data,
+            'moneda': {
+                'codigo': negocio.moneda_principal.codigo,
+                'nombre': negocio.moneda_principal.nombre,
+                'simbolo': negocio.moneda_principal.simbolo,
+            },
+            'zona_horaria': negocio.zona_horaria,
+        })
+
+
+class OnboardingProgressView(APIView):
+    """Onboarding progress - server-side storage"""
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        negocio = request.user.negocio
+        if not negocio:
+            return Response({'paso_actual': 0, 'completado': False})
+
+        # Calculate progress based on what's been configured
+        progress = {
+            'negocio_configurado': bool(negocio.razon_social and negocio.identificacion_fiscal),
+            'fiscal_configurado': bool(negocio.regimen_fiscal or negocio.ambiente_fiscal),
+            'sucursal_creada': negocio.sucursales.exists(),
+            'plan_cuentas_cargado': CuentaContable.objects.filter(negocio=negocio).count() > 0,
+            'ncf_configurado': SecuenciaNCF.objects.filter(negocio=negocio).exists(),
+            'usuarios_creados': Usuario.objects.filter(negocio=negocio).count() > 1,
+            'certificado_configurado': bool(negocio.certificado_digital_path),
+        }
+
+        pasos_completados = sum(1 for v in progress.values() if v)
+        total_pasos = len(progress)
+
+        return Response({
+            'paso_actual': pasos_completados,
+            'total_pasos': total_pasos,
+            'completado': pasos_completados >= total_pasos,
+            'progreso': progress,
+        })
+
+    def post(self, request):
+        # Accept step updates - just returns current state (actual data saved via individual endpoints)
+        return self.get(request)
+
+
 class ApiKeyViewSet(viewsets.ModelViewSet):
     """API key management for external integrations."""
     permission_classes = [IsAuthenticated, CanManageApiKeys]
@@ -1165,7 +1232,13 @@ class VentaViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def dashboard(self, request):
+        from django.core.cache import cache
         hoy = timezone.now().date()
+        cache_key = f'dashboard:{request.user.negocio_id}:{hoy}'
+        cached = cache.get(cache_key)
+        if cached:
+            return Response(cached)
+
         user = request.user
         ventas = Venta.objects.filter(
             negocio=user.negocio, fecha__date=hoy, estado='COMPLETADA',
@@ -1183,12 +1256,14 @@ class VentaViewSet(viewsets.ModelViewSet):
             or user.rol in ('ADMIN_NEGOCIO', 'SUPER_ADMIN', 'CONTADOR', 'GERENTE')
         )
 
-        return Response({
+        result = {
             'total_ventas': total,
             'total_ganancia': data['total_ganancia'] or 0 if can_see_profit else None,
             'cantidad_ventas': cantidad,
             'ticket_promedio': round(total / cantidad, 2) if cantidad > 0 else 0,
-        })
+        }
+        cache.set(cache_key, result, 300)  # 5 minutes
+        return Response(result)
 
     @action(detail=True, methods=['post'], url_path='emitir-ecf')
     def emitir_ecf(self, request, pk=None):

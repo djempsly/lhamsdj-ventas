@@ -19,9 +19,13 @@ class TestPais:
         assert str(pais) is not None
 
     def test_unique_codigo(self):
+        from api.models import Pais
         PaisFactory(codigo='DO')
         with pytest.raises(IntegrityError):
-            PaisFactory(codigo='DO')
+            Pais.objects.create(
+                codigo='DO', nombre='Duplicado', moneda_codigo='DOP',
+                moneda_simbolo='RD$',
+            )
 
 
 @pytest.mark.django_db

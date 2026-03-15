@@ -103,6 +103,7 @@ class ProductoFactory(DjangoModelFactory):
     categoria = factory.SubFactory(CategoriaFactory, negocio=factory.SelfAttribute('..negocio'))
     nombre = factory.Sequence(lambda n: f'Producto Test {n}')
     codigo_interno = factory.Sequence(lambda n: f'PROD{n:05d}')
+    codigo_barras = factory.Sequence(lambda n: f'7890{n:09d}')
     tipo = 'PRODUCTO'
     precio_costo = Decimal('100.00')
     precio_venta = Decimal('150.00')
@@ -134,6 +135,19 @@ class ProveedorFactory(DjangoModelFactory):
     negocio = factory.SubFactory(NegocioFactory)
     identificacion_fiscal = factory.Sequence(lambda n: f'5{n:08d}')
     nombre = factory.Sequence(lambda n: f'Proveedor Test {n}')
+    telefono = factory.Sequence(lambda n: f'809-555-{n:04d}')
+    activo = True
+
+
+class AlmacenFactory(DjangoModelFactory):
+    class Meta:
+        model = 'api.Almacen'
+
+    negocio = factory.SubFactory(NegocioFactory)
+    sucursal = factory.SubFactory(SucursalFactory, negocio=factory.SelfAttribute('..negocio'))
+    nombre = factory.Sequence(lambda n: f'Almacen {n}')
+    codigo = factory.Sequence(lambda n: f'ALM{n:03d}')
+    es_principal = True
     activo = True
 
 
@@ -190,6 +204,8 @@ class CompraFactory(DjangoModelFactory):
     negocio = factory.SubFactory(NegocioFactory)
     proveedor = factory.SubFactory(ProveedorFactory, negocio=factory.SelfAttribute('..negocio'))
     numero = factory.Sequence(lambda n: f'CMP-{n:06d}')
+    fecha = factory.LazyFunction(lambda: timezone.now().date())
+    almacen = factory.SubFactory('api.tests.factories.AlmacenFactory', negocio=factory.SelfAttribute('..negocio'))
     subtotal = Decimal('5000.00')
     total_impuestos = Decimal('900.00')
     total = Decimal('5900.00')

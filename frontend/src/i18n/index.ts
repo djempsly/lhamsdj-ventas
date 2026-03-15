@@ -2,11 +2,17 @@
 import { createContext, useContext } from "react";
 import es from "./es";
 import en from "./en";
+import pt from "./pt";
 import type { Translations } from "./es";
 
-export type Locale = "es" | "en";
+export type Locale = "es" | "en" | "pt";
 
-const translations: Record<Locale, Translations> = { es, en };
+const translations: Record<Locale, Translations> = {
+  es,
+  en,
+  // pt is a partial stub; cast to satisfy the full Translations type
+  pt: pt as unknown as Translations,
+};
 
 export function getTranslations(locale: Locale): Translations {
   return translations[locale] || translations.es;
@@ -28,5 +34,5 @@ export function useI18n(): Translations {
   return useContext(I18nContext);
 }
 
-export { es, en };
+export { es, en, pt };
 export type { Translations };

@@ -32,6 +32,34 @@ class Pais(models.Model):
         return f"{self.nombre} ({self.codigo})"
 
 
+class Impuesto(models.Model):
+    """Impuestos flexibles por país - No hardcodea ITBIS"""
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    pais = models.ForeignKey(Pais, on_delete=models.CASCADE, related_name='impuestos')
+    nombre = models.CharField(max_length=50)  # ITBIS, IVA, ISC, Propina Legal, etc.
+    codigo = models.CharField(max_length=10)  # ITBIS18, IVA16, ISC, etc.
+    tasa = models.DecimalField(max_digits=5, decimal_places=2)
+    tipo = models.CharField(max_length=20, choices=[
+        ('GENERAL', 'Impuesto General'),
+        ('REDUCIDO', 'Tasa Reducida'),
+        ('EXENTO', 'Exento'),
+        ('ESPECIAL', 'Impuesto Especial'),
+    ], default='GENERAL')
+    aplica_a = models.CharField(max_length=20, choices=[
+        ('PRODUCTOS', 'Productos'),
+        ('SERVICIOS', 'Servicios'),
+        ('AMBOS', 'Productos y Servicios'),
+    ], default='AMBOS')
+    activo = models.BooleanField(default=True)
+
+    class Meta:
+        unique_together = ['pais', 'codigo']
+        ordering = ['pais', 'nombre']
+
+    def __str__(self):
+        return f"{self.nombre} ({self.tasa}%) - {self.pais.nombre}"
+
+
 class Moneda(models.Model):
     """Soporte multi-moneda"""
     codigo = models.CharField(max_length=3, primary_key=True)  # USD, DOP, EUR
@@ -576,8 +604,8 @@ class Producto(models.Model):
     
     @property
     def margen(self):
-        if self.precio_costo > 0:
-            return ((self.precio_venta - self.precio_costo) / self.precio_costo) * 100
+        if self.precio_venta > 0:
+            return ((self.precio_venta - self.precio_costo) / self.precio_venta) * 100
         return 0
     
     def __str__(self):

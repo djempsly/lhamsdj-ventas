@@ -1,13 +1,17 @@
 "use client";
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useRouter } from "next/navigation";
+import Papa from "papaparse";
+import { z } from "zod";
 import { clienteService } from "@/services/clientes";
 import { clienteSchema } from "@/lib/validations/cliente";
 import { useDebounce } from "@/hooks/useDebounce";
 import { usePagination } from "@/hooks/usePagination";
 import { usePermissions } from "@/hooks/usePermissions";
 import { formatCurrency } from "@/lib/constants";
+import { useI18n } from "@/i18n";
 
 interface Cliente {
   id: number;
@@ -23,6 +27,24 @@ interface Cliente {
   activo: boolean;
 }
 
+const csvRowSchema = z.object({
+  nombre: z.string().min(2, "Nombre debe tener al menos 2 caracteres"),
+  tipo_documento: z.enum(["CEDULA", "RNC", "PASAPORTE", "OTRO"]).default("CEDULA"),
+  numero_documento: z.string().min(1, "Numero de documento requerido"),
+  telefono: z.string().optional().default(""),
+  email: z.string().email("Email invalido").optional().or(z.literal("")).default(""),
+  direccion: z.string().optional().default(""),
+  tipo_cliente: z.enum(["FINAL", "CREDITO", "GUBERNAMENTAL", "ESPECIAL"]).default("FINAL"),
+  limite_credito: z.coerce.number().min(0).default(0),
+});
+
+interface CsvParsedRow {
+  rowIndex: number;
+  data: Record<string, unknown>;
+  valid: boolean;
+  errors: string[];
+}
+
 const TEMA_DEFAULT = {
   bg: "#03080f", card: "rgba(255,255,255,0.02)",
   borde: "rgba(255,255,255,0.05)", texto: "#e2eaf5",
@@ -30,6 +52,8 @@ const TEMA_DEFAULT = {
 };
 
 export default function ClientesPage() {
+  const i18n = useI18n();
+  const router = useRouter();
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [loading, setLoading] = useState(true);
   const [busqueda, setBusqueda] = useState("");
@@ -41,6 +65,13 @@ export default function ClientesPage() {
   const [serverError, setServerError] = useState("");
   const [filtroTipo, setFiltroTipo] = useState("");
   const [filtroActivo, setFiltroActivo] = useState("");
+
+  // CSV Import state
+  const [showImportModal, setShowImportModal] = useState(false);
+  const [csvData, setCsvData] = useState<CsvParsedRow[]>([]);
+  const [importing, setImporting] = useState(false);
+  const [importResults, setImportResults] = useState<{ imported: number; failed: number } | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const debouncedSearch = useDebounce(busqueda, 300);
   const pagination = usePagination(25);
@@ -109,7 +140,7 @@ export default function ClientesPage() {
         const msg = Object.values(e.response.data).flat().join(". ");
         setServerError(String(msg).substring(0, 200));
       } else {
-        setServerError("Error de conexion. Intente nuevamente.");
+        setServerError(i18n.clients.connectionError);
       }
     } finally {
       setSaving(false);
@@ -117,7 +148,7 @@ export default function ClientesPage() {
   };
 
   const desactivarCliente = async (id: number) => {
-    if (!confirm("Desactivar este cliente?")) return;
+    if (!confirm(i18n.clients.confirmDeactivate)) return;
     await clienteService.desactivar(id);
     cargarDatos();
   };
@@ -157,6 +188,61 @@ export default function ClientesPage() {
       window.URL.revokeObjectURL(url);
     } catch { /* error */ }
   };
+
+  const handleCsvFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportResults(null);
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: true,
+      complete: (results) => {
+        const parsed: CsvParsedRow[] = (results.data as Record<string, unknown>[]).map((row, i) => {
+          const result = csvRowSchema.safeParse(row);
+          if (result.success) {
+            return { rowIndex: i + 1, data: result.data as Record<string, unknown>, valid: true, errors: [] };
+          } else {
+            const errMsgs = result.error.issues.map((iss) => `${iss.path.join(".")}: ${iss.message}`);
+            return { rowIndex: i + 1, data: row, valid: false, errors: errMsgs };
+          }
+        });
+        setCsvData(parsed);
+      },
+      error: () => {
+        setCsvData([]);
+      },
+    });
+    // Reset input so same file can be re-selected
+    e.target.value = "";
+  };
+
+  const importarValidos = async () => {
+    const validos = csvData.filter((r) => r.valid);
+    if (validos.length === 0) return;
+    setImporting(true);
+    let imported = 0;
+    let failed = 0;
+    for (const row of validos) {
+      try {
+        await clienteService.crear(row.data);
+        imported++;
+      } catch {
+        failed++;
+      }
+    }
+    setImportResults({ imported, failed });
+    setImporting(false);
+    if (imported > 0) cargarDatos();
+  };
+
+  const closeImportModal = () => {
+    setShowImportModal(false);
+    setCsvData([]);
+    setImportResults(null);
+  };
+
+  const csvValidCount = csvData.filter((r) => r.valid).length;
+  const csvInvalidCount = csvData.filter((r) => !r.valid).length;
 
   // Stats from current page
   const conBalance = clientes.filter(c => c.balance > 0).length;
@@ -244,20 +330,21 @@ export default function ClientesPage() {
       <div className="page">
         <div className="header">
           <div className="header-left">
-            <h1 className="page-title"><span>Clientes</span></h1>
+            <h1 className="page-title"><span>{i18n.clients.title}</span></h1>
           </div>
           <div style={{ display: "flex", gap: 8 }}>
-            <button className="btn-outline" onClick={exportarCSV}>Exportar CSV</button>
-            <button className="btn-primary" onClick={abrirNuevo}>+ Nuevo Cliente</button>
+            <button className="btn-outline" onClick={() => setShowImportModal(true)}>{i18n.clients.importCsv}</button>
+            <button className="btn-outline" onClick={exportarCSV}>{i18n.clients.exportCsv}</button>
+            <button className="btn-primary" onClick={abrirNuevo}>+ {i18n.clients.newClient}</button>
           </div>
         </div>
 
         <div className="stats-row">
           {[
-            { val: pagination.total, label: "Total clientes" },
-            { val: conBalance, label: "Con balance" },
-            { val: formatCurrency(totalCartera), label: "Total cartera" },
-            { val: clientesCredito, label: "Clientes credito" },
+            { val: pagination.total, label: i18n.clients.totalClients },
+            { val: conBalance, label: i18n.clients.withBalance },
+            { val: formatCurrency(totalCartera), label: i18n.clients.totalPortfolio },
+            { val: clientesCredito, label: i18n.clients.creditClients },
           ].map((s, i) => (
             <div className="mini-stat" key={i}>
               <div className="mini-stat-val">{s.val}</div>
@@ -269,22 +356,22 @@ export default function ClientesPage() {
         <div className="toolbar">
           <input
             className="search-input"
-            placeholder="Buscar por nombre o documento..."
+            placeholder={i18n.clients.searchPlaceholder}
             value={busqueda}
             onChange={e => setBusqueda(e.target.value.substring(0, 100))}
             maxLength={100}
           />
           <select className="filter-select" value={filtroTipo} onChange={e => setFiltroTipo(e.target.value)}>
-            <option value="">Todos los tipos</option>
-            <option value="FINAL">Consumidor Final</option>
-            <option value="CREDITO">Credito</option>
-            <option value="GUBERNAMENTAL">Gubernamental</option>
-            <option value="ESPECIAL">Especial</option>
+            <option value="">{i18n.clients.allTypes}</option>
+            <option value="FINAL">{i18n.clients.finalConsumer}</option>
+            <option value="CREDITO">{i18n.clients.credit}</option>
+            <option value="GUBERNAMENTAL">{i18n.clients.governmental}</option>
+            <option value="ESPECIAL">{i18n.clients.special}</option>
           </select>
           <select className="filter-select" value={filtroActivo} onChange={e => setFiltroActivo(e.target.value)}>
-            <option value="">Todos</option>
-            <option value="true">Activos</option>
-            <option value="false">Inactivos</option>
+            <option value="">{i18n.clients.allStatus}</option>
+            <option value="true">{i18n.clients.activeOnly}</option>
+            <option value="false">{i18n.clients.inactiveOnly}</option>
           </select>
         </div>
 
@@ -293,7 +380,7 @@ export default function ClientesPage() {
             <table>
               <thead>
                 <tr>
-                  <th>Documento</th><th>Nombre</th><th>Telefono</th><th>Tipo</th><th>Limite</th><th>Balance</th><th>Estado</th><th>Acciones</th>
+                  <th>{i18n.clients.document}</th><th>{i18n.clients.name}</th><th>{i18n.clients.phone}</th><th>{i18n.clients.clientType}</th><th>{i18n.clients.creditLimit}</th><th>{i18n.clients.balance}</th><th>{i18n.common.status}</th><th>{i18n.common.actions}</th>
                 </tr>
               </thead>
               <tbody>
@@ -308,14 +395,14 @@ export default function ClientesPage() {
             </table>
           </div>
         ) : clientes.length === 0 ? (
-          <div className="empty-state"><p>{debouncedSearch ? "No se encontraron clientes." : "No hay clientes. Crea el primero!"}</p></div>
+          <div className="empty-state"><p>{debouncedSearch ? i18n.clients.noClientsSearch : i18n.clients.noClientsEmpty}</p></div>
         ) : (
           <div className="table-wrap">
             <table>
               <thead>
                 <tr>
-                  <th>Documento</th><th>Nombre</th><th>Telefono</th>
-                  <th>Tipo</th><th>Limite</th><th>Balance</th><th>Estado</th><th>Acciones</th>
+                  <th>{i18n.clients.document}</th><th>{i18n.clients.name}</th><th>{i18n.clients.phone}</th>
+                  <th>{i18n.clients.clientType}</th><th>{i18n.clients.creditLimit}</th><th>{i18n.clients.balance}</th><th>{i18n.common.status}</th><th>{i18n.common.actions}</th>
                 </tr>
               </thead>
               <tbody>
@@ -334,13 +421,14 @@ export default function ClientesPage() {
                         {formatCurrency(c.balance)}
                       </span>
                       {c.tipo_cliente === "CREDITO" && c.balance > c.limite_credito && c.limite_credito > 0 && (
-                        <span className="credit-warn"> EXCEDE</span>
+                        <span className="credit-warn"> {i18n.clients.exceeds}</span>
                       )}
                     </td>
-                    <td><span className={`badge ${c.activo ? "badge-green" : "badge-red"}`}>{c.activo ? "Activo" : "Inactivo"}</span></td>
+                    <td><span className={`badge ${c.activo ? "badge-green" : "badge-red"}`}>{c.activo ? i18n.clients.active : i18n.clients.inactive}</span></td>
                     <td>
-                      <button className="action-btn" onClick={() => abrirEditar(c)}>Editar</button>
-                      {isAdmin && <button className="action-btn del" onClick={() => desactivarCliente(c.id)}>Desactivar</button>}
+                      <button className="action-btn" onClick={() => router.push(`/dashboard/clientes/${c.id}`)}>{i18n.common.view}</button>
+                      <button className="action-btn" onClick={() => abrirEditar(c)}>{i18n.common.edit}</button>
+                      {isAdmin && <button className="action-btn del" onClick={() => desactivarCliente(c.id)}>{i18n.clients.deactivate}</button>}
                     </td>
                   </tr>
                 ))}
@@ -348,10 +436,10 @@ export default function ClientesPage() {
             </table>
             <div className="pagination">
               <div className="page-info">
-                Mostrando {(pagination.page - 1) * pagination.pageSize + 1}–{Math.min(pagination.page * pagination.pageSize, pagination.total)} de {pagination.total}
+                {i18n.common.showing} {(pagination.page - 1) * pagination.pageSize + 1}–{Math.min(pagination.page * pagination.pageSize, pagination.total)} {i18n.common.of} {pagination.total}
               </div>
               <div className="page-btns">
-                <button className="page-btn" onClick={pagination.prevPage} disabled={!pagination.canPrev}>Anterior</button>
+                <button className="page-btn" onClick={pagination.prevPage} disabled={!pagination.canPrev}>{i18n.common.previous}</button>
                 {Array.from({ length: Math.min(pagination.totalPages, 5) }, (_, i) => {
                   const startPage = Math.max(1, Math.min(pagination.page - 2, pagination.totalPages - 4));
                   const p = startPage + i;
@@ -360,7 +448,7 @@ export default function ClientesPage() {
                     <button key={p} className={`page-btn ${p === pagination.page ? "active" : ""}`} onClick={() => pagination.setPage(p)}>{p}</button>
                   );
                 })}
-                <button className="page-btn" onClick={pagination.nextPage} disabled={!pagination.canNext}>Siguiente</button>
+                <button className="page-btn" onClick={pagination.nextPage} disabled={!pagination.canNext}>{i18n.common.next}</button>
               </div>
             </div>
           </div>
@@ -370,19 +458,19 @@ export default function ClientesPage() {
       {showModal && (
         <div className="modal-overlay" onClick={e => e.target === e.currentTarget && setShowModal(false)}>
           <div className="modal">
-            <h2 className="modal-title">{editando ? "Editar Cliente" : "Nuevo Cliente"}</h2>
+            <h2 className="modal-title">{editando ? i18n.clients.editClient : i18n.clients.newClient}</h2>
             <form onSubmit={handleSubmit(onSubmit)}>
               <div className="form-grid">
                 {serverError && <div className="server-error">{serverError}</div>}
 
                 <div className="form-group full">
-                  <label className="form-label">Nombre *</label>
-                  <input className={`form-input ${errors.nombre ? "error" : ""}`} placeholder="Nombre completo o razon social" {...register("nombre")} maxLength={200} />
+                  <label className="form-label">{i18n.clients.name} *</label>
+                  <input className={`form-input ${errors.nombre ? "error" : ""}`} placeholder={i18n.clients.name} {...register("nombre")} maxLength={200} />
                   {errors.nombre && <span className="field-error">{errors.nombre.message}</span>}
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Tipo Documento</label>
+                  <label className="form-label">{i18n.clients.documentType}</label>
                   <select className="form-input" {...register("tipo_documento")}>
                     <option value="CEDULA">Cedula</option>
                     <option value="RNC">RNC</option>
@@ -392,61 +480,184 @@ export default function ClientesPage() {
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">No. Documento *</label>
+                  <label className="form-label">{i18n.clients.documentNumber} *</label>
                   <input className={`form-input ${errors.numero_documento ? "error" : ""}`} placeholder="000-0000000-0" {...register("numero_documento")} maxLength={20} />
                   {errors.numero_documento && <span className="field-error">{errors.numero_documento.message}</span>}
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Telefono</label>
+                  <label className="form-label">{i18n.clients.phone}</label>
                   <input className={`form-input ${errors.telefono ? "error" : ""}`} placeholder="809-000-0000" {...register("telefono")} maxLength={20} />
                   {errors.telefono && <span className="field-error">{errors.telefono.message}</span>}
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Email</label>
+                  <label className="form-label">{i18n.clients.email}</label>
                   <input className={`form-input ${errors.email ? "error" : ""}`} type="email" placeholder="correo@ejemplo.com" {...register("email")} />
                   {errors.email && <span className="field-error">{errors.email.message}</span>}
                 </div>
 
                 <div className="form-group full">
-                  <label className="form-label">Direccion</label>
+                  <label className="form-label">{i18n.clients.address}</label>
                   <input className={`form-input ${errors.direccion ? "error" : ""}`} placeholder="Direccion completa" {...register("direccion")} />
                   {errors.direccion && <span className="field-error">{errors.direccion.message}</span>}
                 </div>
 
                 <div className="form-group">
-                  <label className="form-label">Tipo de Cliente</label>
+                  <label className="form-label">{i18n.clients.clientType}</label>
                   <select className="form-input" {...register("tipo_cliente")}>
-                    <option value="FINAL">Consumidor Final</option>
-                    <option value="CREDITO">Credito</option>
-                    <option value="GUBERNAMENTAL">Gubernamental</option>
-                    <option value="ESPECIAL">Especial</option>
+                    <option value="FINAL">{i18n.clients.finalConsumer}</option>
+                    <option value="CREDITO">{i18n.clients.credit}</option>
+                    <option value="GUBERNAMENTAL">{i18n.clients.governmental}</option>
+                    <option value="ESPECIAL">{i18n.clients.special}</option>
                   </select>
                 </div>
 
                 {tipoCliente === "CREDITO" && (
                   <div className="form-group">
-                    <label className="form-label">Limite de Credito (RD$)</label>
+                    <label className="form-label">{i18n.clients.creditLimit} (RD$)</label>
                     <input
                       className={`form-input ${errors.limite_credito ? "error" : ""}`}
                       type="number" step="0.01" min="0" placeholder="0.00"
                       {...register("limite_credito")}
                       disabled={!canEditCredit}
                     />
-                    {!canEditCredit && <span className="field-error">No tiene permisos para editar limites de credito</span>}
+                    {!canEditCredit && <span className="field-error">{i18n.clients.noCreditPermission}</span>}
                     {errors.limite_credito && <span className="field-error">{errors.limite_credito.message}</span>}
                   </div>
                 )}
               </div>
 
               <div className="modal-actions">
-                <button type="button" className="btn-cancel" onClick={() => setShowModal(false)}>Cancelar</button>
+                <button type="button" className="btn-cancel" onClick={() => setShowModal(false)}>{i18n.common.cancel}</button>
                 <button type="submit" className="btn-primary" disabled={saving}>
-                  {saving ? "Guardando..." : editando ? "Guardar cambios" : "Crear cliente"}
+                  {saving ? i18n.clients.saving : editando ? i18n.clients.saveChanges : i18n.clients.createClient}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showImportModal && (
+        <div className="modal-overlay" onClick={e => e.target === e.currentTarget && closeImportModal()}>
+          <div className="modal" style={{ maxWidth: 720 }}>
+            <h2 className="modal-title">{i18n.clients.importTitle}</h2>
+            <p style={{ fontSize: 13, color: tema.subtexto, marginBottom: 20 }}>
+              {i18n.clients.importDescription}
+            </p>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv"
+              onChange={handleCsvFile}
+              style={{ display: "none" }}
+            />
+            <button
+              className="btn-outline"
+              onClick={() => fileInputRef.current?.click()}
+              style={{ marginBottom: 20 }}
+            >
+              {i18n.clients.selectFile}
+            </button>
+
+            {csvData.length > 0 && !importResults && (
+              <>
+                <div style={{ display: "flex", gap: 16, marginBottom: 16 }}>
+                  <div style={{
+                    background: "rgba(16,185,129,0.08)", border: "1px solid rgba(16,185,129,0.18)",
+                    borderRadius: 10, padding: "10px 16px", flex: 1, textAlign: "center",
+                  }}>
+                    <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 20, color: "#10b981" }}>{csvValidCount}</div>
+                    <div style={{ fontSize: 12, color: "#10b981" }}>{i18n.clients.validRows}</div>
+                  </div>
+                  <div style={{
+                    background: "rgba(239,68,68,0.08)", border: "1px solid rgba(239,68,68,0.18)",
+                    borderRadius: 10, padding: "10px 16px", flex: 1, textAlign: "center",
+                  }}>
+                    <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 20, color: "#ef4444" }}>{csvInvalidCount}</div>
+                    <div style={{ fontSize: 12, color: "#ef4444" }}>{i18n.clients.invalidRows}</div>
+                  </div>
+                </div>
+
+                <div style={{ maxHeight: 300, overflowY: "auto", marginBottom: 20 }}>
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>{i18n.clients.row}</th>
+                        <th>{i18n.clients.name}</th>
+                        <th>{i18n.clients.document}</th>
+                        <th>{i18n.clients.clientType}</th>
+                        <th>{i18n.common.status}</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {csvData.slice(0, 50).map((row) => (
+                        <tr key={row.rowIndex}>
+                          <td>{row.rowIndex}</td>
+                          <td>{String(row.data.nombre || "")}</td>
+                          <td>{String(row.data.numero_documento || "")}</td>
+                          <td>{String(row.data.tipo_cliente || "")}</td>
+                          <td>
+                            {row.valid ? (
+                              <span className="badge badge-green">{i18n.clients.valid}</span>
+                            ) : (
+                              <span className="badge badge-red" title={row.errors.join("; ")}>
+                                {i18n.clients.invalid}
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {csvData.length > 50 && (
+                    <p style={{ fontSize: 12, color: tema.subtexto, textAlign: "center", marginTop: 8 }}>
+                      Mostrando 50 de {csvData.length} filas
+                    </p>
+                  )}
+                </div>
+              </>
+            )}
+
+            {importResults && (
+              <div style={{
+                background: tema.card, border: `1px solid ${tema.borde}`,
+                borderRadius: 12, padding: 20, marginBottom: 20,
+              }}>
+                <h3 style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 16, marginBottom: 12 }}>
+                  {i18n.clients.importResults}
+                </h3>
+                <div style={{ display: "flex", gap: 16 }}>
+                  <div style={{ textAlign: "center", flex: 1 }}>
+                    <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 24, color: "#10b981" }}>
+                      {importResults.imported}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#10b981" }}>{i18n.clients.imported}</div>
+                  </div>
+                  <div style={{ textAlign: "center", flex: 1 }}>
+                    <div style={{ fontFamily: "'Syne',sans-serif", fontWeight: 800, fontSize: 24, color: "#ef4444" }}>
+                      {importResults.failed}
+                    </div>
+                    <div style={{ fontSize: 12, color: "#ef4444" }}>{i18n.clients.failed}</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="modal-actions">
+              <button type="button" className="btn-cancel" onClick={closeImportModal}>{i18n.common.close}</button>
+              {csvData.length > 0 && !importResults && (
+                <button
+                  className="btn-primary"
+                  onClick={importarValidos}
+                  disabled={importing || csvValidCount === 0}
+                >
+                  {importing ? i18n.clients.importing : `${i18n.clients.importValid} ${csvValidCount}`}
+                </button>
+              )}
+            </div>
           </div>
         </div>
       )}

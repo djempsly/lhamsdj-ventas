@@ -6,7 +6,7 @@ from .factories import (
     NegocioFactory, UsuarioFactory, ProductoFactory, ClienteFactory,
     ProveedorFactory, CategoriaFactory, CuentaContableFactory,
     VentaFactory, CompraFactory, CuentaBancariaFactory, PeriodoContableFactory,
-    SucursalFactory,
+    SucursalFactory, AlmacenFactory,
 )
 
 
@@ -45,6 +45,7 @@ class TestProductoViewSet:
         response = auth_client.post('/api/v1/productos/', {
             'categoria': str(cat.id),
             'nombre': 'Test Product',
+            'codigo_barras': '7890000000099',
             'precio_costo': '100.00',
             'precio_venta': '150.00',
             'stock_actual': 50,
@@ -59,7 +60,7 @@ class TestProductoViewSet:
 
     def test_stock_bajo(self, auth_client, usuario):
         ProductoFactory(negocio=usuario.negocio, stock_actual=5, stock_minimo=10)
-        response = auth_client.get('/api/v1/productos/stock-bajo/')
+        response = auth_client.get('/api/v1/productos/stock_bajo/')
         assert response.status_code == 200
 
     def test_unauthenticated(self, api_client):
@@ -98,6 +99,7 @@ class TestProveedorViewSet:
         response = auth_client.post('/api/v1/proveedores/', {
             'identificacion_fiscal': '999888777',
             'nombre': 'Distribuidora XYZ',
+            'telefono': '809-555-0099',
         })
         assert response.status_code == 201
 
@@ -142,8 +144,11 @@ class TestCompraViewSet:
     def test_create(self, auth_client, usuario):
         prov = ProveedorFactory(negocio=usuario.negocio)
         prod = ProductoFactory(negocio=usuario.negocio)
+        almacen = AlmacenFactory(negocio=usuario.negocio, sucursal=usuario.sucursal)
         response = auth_client.post('/api/v1/compras/', {
             'proveedor': str(prov.id),
+            'almacen': str(almacen.id),
+            'fecha': '2024-06-15',
             'tipo_bienes_servicios': '01',
             'forma_pago': 'TRANSFERENCIA',
             'detalles_input': [

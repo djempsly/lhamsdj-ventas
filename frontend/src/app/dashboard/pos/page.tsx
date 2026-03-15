@@ -5,6 +5,7 @@ import { ventaService } from "@/services/ventas";
 import { clienteService } from "@/services/clientes";
 import { usePermissions } from "@/hooks/usePermissions";
 import { formatCurrency, DENOMINACIONES_RD, TIPOS_NCF } from "@/lib/constants";
+import { useI18n } from "@/i18n";
 
 interface Producto {
   id: string;
@@ -48,6 +49,7 @@ const TEMA_DEFAULT = {
 const CATEGORIAS = ["Todos", "Bebidas", "Alimentos", "Limpieza", "Ferreteria", "Otros"];
 
 export default function POSPage() {
+  const i18n = useI18n();
   const [mounted, setMounted] = useState(false);
   const [tema, setTema] = useState(TEMA_DEFAULT);
   const [busqueda, setBusqueda] = useState("");
@@ -224,9 +226,9 @@ export default function POSPage() {
 
   const cobrar = async () => {
     setError("");
-    if (cart.length === 0) { setError("El carrito esta vacio."); return; }
-    if (tipoPago === "EFECTIVO" && pagado < total) { setError("Monto pagado insuficiente."); return; }
-    if (ncfRequiresClient && !clienteId) { setError(`NCF tipo ${tipoNCF} requiere un cliente.`); return; }
+    if (cart.length === 0) { setError(i18n.pos.emptyCartError); return; }
+    if (tipoPago === "EFECTIVO" && pagado < total) { setError(i18n.pos.insufficientPayment); return; }
+    if (ncfRequiresClient && !clienteId) { setError(`NCF ${tipoNCF} ${i18n.pos.ncfRequiresClient}.`); return; }
 
     // Discount authorization check
     if (descGlobal > 0 && subtotal > 0) {
@@ -264,7 +266,7 @@ export default function POSPage() {
         setHistorial(d.results || []);
       }).catch(() => {});
     } catch {
-      setError("Error al procesar la venta. Intente nuevamente.");
+      setError(i18n.pos.saleError);
     } finally {
       setProcesando(false);
     }
@@ -273,7 +275,7 @@ export default function POSPage() {
   cobrarRef.current = cobrar;
 
   const anularVenta = async (id: string) => {
-    const motivo = prompt("Motivo de anulacion:");
+    const motivo = prompt(i18n.pos.voidReason);
     if (!motivo) return;
     try {
       await ventaService.anular(id);
@@ -289,14 +291,14 @@ export default function POSPage() {
       <style>body{font-family:'Courier New',monospace;width:280px;margin:0 auto;padding:10px;font-size:12px}.center{text-align:center}.line{border-top:1px dashed #000;margin:8px 0}.row{display:flex;justify-content:space-between}.bold{font-weight:bold}.big{font-size:16px;font-weight:bold}h2{margin:4px 0;font-size:14px}@media print{body{width:auto}}</style></head><body>
       <div class="center"><h2>L'hams DJ - ERP</h2><p>${fecha}</p></div>
       <div class="line"></div>
-      <div class="row bold"><span>Recibo #${venta.numero}</span><span>NCF: ${tipoNCF}</span></div>
+      <div class="row bold"><span>#${venta.numero}</span><span>NCF: ${tipoNCF}</span></div>
       <div class="line"></div>
       ${cart.map(c => `<div class="row"><span>${c.producto.nombre} x${c.cantidad}</span><span>$${(c.cantidad * c.producto.precio_venta).toFixed(2)}</span></div>`).join("")}
       <div class="line"></div>
       <div class="row big"><span>TOTAL:</span><span>$${venta.total.toFixed(2)}</span></div>
-      ${tipoPago === "EFECTIVO" ? `<div class="row bold"><span>Cambio:</span><span>$${venta.cambio.toFixed(2)}</span></div>` : `<div class="row"><span>Pago:</span><span>${tipoPago}</span></div>`}
+      ${tipoPago === "EFECTIVO" ? `<div class="row bold"><span>${i18n.pos.change}:</span><span>$${venta.cambio.toFixed(2)}</span></div>` : `<div class="row"><span>${i18n.pos.paymentType}:</span><span>${tipoPago}</span></div>`}
       <div class="line"></div>
-      <div class="center"><p>Gracias por su compra!</p></div>
+      <div class="center"><p>${i18n.pos.thankYou}</p></div>
       </body></html>`);
     win.document.close();
     setTimeout(() => { win.print(); }, 300);
@@ -409,28 +411,28 @@ export default function POSPage() {
       <div className={`pos-root ${fullscreen ? "pos-fullscreen" : ""}`}>
         <div className="pos-header">
           <div className="pos-header-left">
-            {!fullscreen && <button className="back-btn" onClick={() => window.location.href = "/dashboard"}>Volver</button>}
-            <h1 className="pos-title"><span>Punto</span> de Venta</h1>
+            {!fullscreen && <button className="back-btn" onClick={() => window.location.href = "/dashboard"}>{i18n.nav.back}</button>}
+            <h1 className="pos-title"><span>{i18n.pos.title.split(" ")[0]}</span> {i18n.pos.title.split(" ").slice(1).join(" ")}</h1>
             <div className="online-indicator" style={{
               background: online ? "rgba(16,185,129,0.1)" : "rgba(239,68,68,0.1)",
               color: online ? "#10b981" : "#ef4444",
             }}>
               <div className="online-dot" style={{ background: online ? "#10b981" : "#ef4444" }} />
-              {online ? "En linea" : "Sin conexion"}
+              {online ? i18n.pos.online : i18n.pos.offline}
             </div>
           </div>
           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
             <span style={{ fontSize: 10, color: tema.subtexto }}>F2 Buscar | F4 Cobrar | F8 Pantalla</span>
-            <button className="back-btn" onClick={() => setShowCuadre(true)}>Cuadre</button>
+            <button className="back-btn" onClick={() => setShowCuadre(true)}>{i18n.pos.cashRegisterBtn}</button>
             <button className="back-btn" onClick={() => setFullscreen(f => !f)}>
-              {fullscreen ? "Salir" : "Pantalla completa"}
+              {fullscreen ? i18n.pos.exitFullscreen : i18n.pos.fullscreen}
             </button>
           </div>
         </div>
 
         <div className="pos-body">
           <div className="pos-left">
-            <input ref={inputRef} className="search-input" placeholder="Buscar producto por nombre o codigo..." value={busqueda} onChange={e => onBusquedaChange(e.target.value.substring(0, 100))} maxLength={100} />
+            <input ref={inputRef} className="search-input" placeholder={i18n.pos.searchProduct} value={busqueda} onChange={e => onBusquedaChange(e.target.value.substring(0, 100))} maxLength={100} />
 
             <div className="categories">
               {CATEGORIAS.map(cat => (
@@ -440,35 +442,35 @@ export default function POSPage() {
               ))}
             </div>
 
-            {buscando && <div className="search-hint">Buscando...</div>}
+            {buscando && <div className="search-hint">{i18n.pos.searching}</div>}
             {!buscando && busqueda && resultados.length === 0 && (
-              <div className="search-hint">No se encontraron productos para &quot;{busqueda}&quot;</div>
+              <div className="search-hint">{i18n.pos.noProductsFound} &quot;{busqueda}&quot;</div>
             )}
             {resultados.length > 0 && (
               <>
-                <div className="section-label">Resultados ({resultados.length})</div>
+                <div className="section-label">{i18n.pos.results} ({resultados.length})</div>
                 <div className="results-grid">
                   {resultados.map(p => (
                     <div key={p.id} className="product-card" onClick={() => agregarAlCarrito(p)}>
                       <div className="pc-name">{p.nombre}</div>
                       <div className="pc-code">{p.codigo_barras}</div>
                       <div className="pc-price">{formatCurrency(p.precio_venta)}</div>
-                      <div className="pc-stock">Stock: {p.stock_actual}</div>
+                      <div className="pc-stock">{i18n.pos.stock}: {p.stock_actual}</div>
                     </div>
                   ))}
                 </div>
               </>
             )}
             {!busqueda && resultados.length === 0 && !buscando && (
-              <div className="search-hint">Escribe el nombre o codigo del producto para buscarlo</div>
+              <div className="search-hint">{i18n.pos.searchHint}</div>
             )}
           </div>
 
           <div className="pos-right">
-            <div className="section-label">Carrito ({cart.length} items)</div>
+            <div className="section-label">{i18n.pos.cart} ({cart.length} {i18n.pos.items})</div>
 
             {cart.length === 0 ? (
-              <div className="cart-empty">Agrega productos buscando a la izquierda</div>
+              <div className="cart-empty">{i18n.pos.emptyCart}</div>
             ) : (
               <>
                 {cart.map((c, i) => (
@@ -489,13 +491,13 @@ export default function POSPage() {
             )}
 
             <div className="cart-total-section">
-              <div className="cart-line"><span>Subtotal</span><span>{formatCurrency(subtotal)}</span></div>
-              {descGlobal > 0 && <div className="cart-line"><span>Descuento</span><span>-{formatCurrency(descGlobal)}</span></div>}
+              <div className="cart-line"><span>{i18n.pos.subtotal}</span><span>{formatCurrency(subtotal)}</span></div>
+              {descGlobal > 0 && <div className="cart-line"><span>{i18n.pos.discount}</span><span>-{formatCurrency(descGlobal)}</span></div>}
               <div className="cart-line"><span>ITBIS</span><span>{formatCurrency(impuestos)}</span></div>
-              <div className="cart-total"><span>Total</span><span>{formatCurrency(total)}</span></div>
+              <div className="cart-total"><span>{i18n.pos.total}</span><span>{formatCurrency(total)}</span></div>
               {tipoPago === "EFECTIVO" && pagado > 0 && (
                 <div className="cart-line" style={{ color: "#10b981", fontWeight: 600 }}>
-                  <span>Cambio</span><span>{formatCurrency(cambio)}</span>
+                  <span>{i18n.pos.change}</span><span>{formatCurrency(cambio)}</span>
                 </div>
               )}
             </div>
@@ -503,7 +505,7 @@ export default function POSPage() {
             <div className="pay-section">
               {/* NCF Type */}
               <div>
-                <div className="pay-label">Tipo NCF</div>
+                <div className="pay-label">{i18n.pos.ncfType}</div>
                 <div className="ncf-row">
                   {TIPOS_NCF.filter(t => t.codigo !== "B11").map(t => (
                     <button key={t.codigo} className={`ncf-btn ${tipoNCF === t.codigo ? "active" : ""}`} onClick={() => setTipoNCF(t.codigo)}>
@@ -515,16 +517,16 @@ export default function POSPage() {
 
               {/* Client */}
               <div>
-                <div className="pay-label">Cliente {ncfRequiresClient && <span style={{ color: "#ef4444" }}>*</span>}</div>
+                <div className="pay-label">{i18n.pos.client} {ncfRequiresClient && <span style={{ color: "#ef4444" }}>*</span>}</div>
                 <select className={`pay-input ${ncfRequiresClient && !clienteId ? "required-error" : ""}`} value={clienteId} onChange={e => setClienteId(e.target.value)}>
-                  <option value="">Consumidor final</option>
+                  <option value="">{i18n.pos.finalConsumer}</option>
                   {clientes.map(c => <option key={c.id} value={c.id}>{c.nombre} - {c.numero_documento}</option>)}
                 </select>
               </div>
 
               {/* Payment type */}
               <div>
-                <div className="pay-label">Tipo de pago</div>
+                <div className="pay-label">{i18n.pos.paymentType}</div>
                 <div className="pay-types">
                   {["EFECTIVO", "TARJETA", "TRANSFERENCIA", "MIXTO"].map(t => (
                     <button key={t} className={`pay-type ${tipoPago === t ? "active" : ""}`} onClick={() => setTipoPago(t)}>{t}</button>
@@ -534,39 +536,39 @@ export default function POSPage() {
 
               {tipoPago === "EFECTIVO" && (
                 <div>
-                  <div className="pay-label">Monto pagado</div>
+                  <div className="pay-label">{i18n.pos.amountPaid}</div>
                   <input className="pay-input" type="number" step="0.01" min="0" placeholder="0.00" value={montoPagado} onChange={e => setMontoPagado(e.target.value)} />
                 </div>
               )}
 
               <div>
-                <div className="pay-label">Descuento global</div>
+                <div className="pay-label">{i18n.pos.globalDiscount}</div>
                 <input className="pay-input" type="number" step="0.01" min="0" placeholder="0.00" value={descuentoGlobal} onChange={e => setDescuentoGlobal(e.target.value)} />
               </div>
 
               <div>
-                <div className="pay-label">Notas</div>
-                <input className="pay-input" placeholder="Notas..." value={notas} onChange={e => setNotas(e.target.value.substring(0, 500))} maxLength={500} />
+                <div className="pay-label">{i18n.pos.notes}</div>
+                <input className="pay-input" placeholder={i18n.pos.notesPlaceholder} value={notas} onChange={e => setNotas(e.target.value.substring(0, 500))} maxLength={500} />
               </div>
 
               {error && <div className="error-msg">{error}</div>}
 
               <button className="btn-cobrar" onClick={cobrar} disabled={procesando || cart.length === 0}>
-                {procesando ? "Procesando..." : `Cobrar ${formatCurrency(total)}`}
+                {procesando ? i18n.pos.processing : `${i18n.pos.charge} ${formatCurrency(total)}`}
               </button>
             </div>
 
             {/* Sale History */}
             {historial.length > 0 && (
               <div className="historial-section">
-                <div className="section-label">Ultimas ventas</div>
+                <div className="section-label">{i18n.pos.recentSales}</div>
                 {historial.map(v => (
                   <div key={v.id} className="historial-item">
                     <span className="historial-num">{v.numero}</span>
                     <span>{formatCurrency(v.total)}</span>
                     <span className={`badge ${v.estado === "COMPLETADA" ? "badge-green" : "badge-red"}`}>{v.estado}</span>
                     {canVoidSales && v.estado === "COMPLETADA" && (
-                      <button className="void-btn" onClick={() => anularVenta(v.id)}>Anular</button>
+                      <button className="void-btn" onClick={() => anularVenta(v.id)}>{i18n.pos.voidSale}</button>
                     )}
                   </div>
                 ))}
@@ -581,13 +583,13 @@ export default function POSPage() {
         <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) { setExito(false); setVentaCreada(null); } }}>
           <div className="modal">
             <div style={{ fontSize: 40, color: "#10b981", marginBottom: 12 }}>OK</div>
-            <h2>Venta Completada</h2>
+            <h2>{i18n.pos.saleCompleted}</h2>
             <p>No. {ventaCreada.numero}</p>
             <div className="total-display">{formatCurrency(ventaCreada.total)}</div>
-            {ventaCreada.cambio > 0 && <p>Cambio: {formatCurrency(ventaCreada.cambio)}</p>}
+            {ventaCreada.cambio > 0 && <p>{i18n.pos.change}: {formatCurrency(ventaCreada.cambio)}</p>}
             <div style={{ marginTop: 12 }}>
-              <button className="btn-action" style={{ background: "linear-gradient(135deg, #059669, #10b981)" }} onClick={() => imprimirRecibo(ventaCreada)}>Imprimir</button>
-              <button className="btn-action" onClick={() => { setExito(false); setVentaCreada(null); inputRef.current?.focus(); }}>Nueva Venta</button>
+              <button className="btn-action" style={{ background: "linear-gradient(135deg, #059669, #10b981)" }} onClick={() => imprimirRecibo(ventaCreada)}>{i18n.pos.printReceipt}</button>
+              <button className="btn-action" onClick={() => { setExito(false); setVentaCreada(null); inputRef.current?.focus(); }}>{i18n.pos.newSale}</button>
             </div>
           </div>
         </div>
@@ -597,7 +599,7 @@ export default function POSPage() {
       {showCuadre && (
         <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setShowCuadre(false); }}>
           <div className="modal" style={{ textAlign: "left", maxWidth: 480 }}>
-            <h2 style={{ marginBottom: 20 }}>Cuadre de Caja</h2>
+            <h2 style={{ marginBottom: 20 }}>{i18n.pos.cashRegister}</h2>
             <div className="cuadre-grid">
               {DENOMINACIONES_RD.map(d => (
                 <React.Fragment key={d}>
@@ -617,8 +619,8 @@ export default function POSPage() {
               <span style={{ color: tema.accent }}>{formatCurrency(totalCuadre)}</span>
             </div>
             <div style={{ display: "flex", gap: 8, marginTop: 16, justifyContent: "flex-end" }}>
-              <button className="back-btn" onClick={() => setShowCuadre(false)}>Cerrar</button>
-              <button className="btn-action" onClick={() => { setShowCuadre(false); }}>Guardar Cuadre</button>
+              <button className="back-btn" onClick={() => setShowCuadre(false)}>{i18n.common.close}</button>
+              <button className="btn-action" onClick={() => { setShowCuadre(false); }}>{i18n.pos.saveCashRegister}</button>
             </div>
           </div>
         </div>
@@ -628,19 +630,19 @@ export default function POSPage() {
       {showDescAuth && (
         <div className="modal-overlay" onClick={e => { if (e.target === e.currentTarget) setShowDescAuth(false); }}>
           <div className="modal">
-            <h2>Autorizacion Requerida</h2>
-            <p style={{ marginBottom: 16 }}>Descuento excede su limite ({maxDiscount}%). Requiere autorizacion de Gerente.</p>
+            <h2>{i18n.pos.authRequired}</h2>
+            <p style={{ marginBottom: 16 }}>{i18n.pos.authDiscountExceeds} ({maxDiscount}%). {i18n.pos.authManagerRequired}</p>
             <input
               className="pay-input"
               type="password"
-              placeholder="Contrasena del gerente"
+              placeholder={i18n.pos.authManagerPassword}
               value={authPassword}
               onChange={e => setAuthPassword(e.target.value)}
               style={{ marginBottom: 12, textAlign: "center" }}
             />
             <div style={{ display: "flex", gap: 8, justifyContent: "center" }}>
-              <button className="back-btn" onClick={() => setShowDescAuth(false)}>Cancelar</button>
-              <button className="btn-action" onClick={() => { setShowDescAuth(false); setAuthPassword(""); }}>Autorizar</button>
+              <button className="back-btn" onClick={() => setShowDescAuth(false)}>{i18n.common.cancel}</button>
+              <button className="btn-action" onClick={() => { setShowDescAuth(false); setAuthPassword(""); }}>{i18n.pos.authorize}</button>
             </div>
           </div>
         </div>

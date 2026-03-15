@@ -72,6 +72,10 @@ router.register(r'seguridad/audit-log', views.AuditLogViewSet, basename='audit-l
 router.register(r'seguridad/confirmaciones', views.ConfirmacionTransaccionViewSet, basename='confirmacion')
 
 urlpatterns = [
+    # Config & Onboarding
+    path('config/country/', views.CountryConfigView.as_view(), name='country-config'),
+    path('onboarding/progress/', views.OnboardingProgressView.as_view(), name='onboarding-progress'),
+
     # Auth
     path('auth/login/', views.CustomLoginView.as_view(), name='login'),
     path('auth/mfa/verify/', views.MFAVerifyView.as_view(), name='mfa-verify'),
